@@ -69,12 +69,12 @@ def handler(job):
 
     # 3) Convert (COLMAP step)
     # لو ظهر: "colmap: command not found" -> هنضيف COLMAP للـ Dockerfile
-    run(["python", "convert.py", "-s", str(dataset_dir)], cwd=GS_DIR)
+    run(["python3", "convert.py", "-s", str(dataset_dir)], cwd=GS_DIR)
 
     # 4) Train
     out_dir.mkdir(parents=True, exist_ok=True)
     run(
-        ["python", "train.py", "-s", str(dataset_dir), "-m", str(out_dir), "--iterations", iterations],
+        ["python3", "train.py", "-s", str(dataset_dir), "-m", str(out_dir), "--iterations", iterations],
         cwd=GS_DIR
     )
 
