@@ -34,8 +34,9 @@ RUN pip install --no-cache-dir --force-reinstall "numpy<2"
 
 # Build CUDA extensions
 RUN pip install --no-cache-dir "setuptools<70" wheel pybind11
-RUN pip install --no-cache-dir --no-build-isolation -e submodules/diff-gaussian-rasterization
-RUN pip install --no-cache-dir --no-build-isolation -e submodules/simple-knn
+RUN pip install --no-cache-dir --no-build-isolation ./submodules/diff-gaussian-rasterization
+RUN pip install --no-cache-dir --no-build-isolation ./submodules/simple-knn
+
 
 # Serverless deps
 WORKDIR /app
