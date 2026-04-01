@@ -34,4 +34,57 @@ def upload_to_supabase(file_path: Path, object_path: str) -> str:
 
     return f"{supabase_url}/storage/v1/object/public/{object_path}"
 
-def run(cmd, cwd
+def run(cmd, cwd: Path):
+    p = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True)
+    if p.returncode != 0:
+        raise RuntimeError(
+            f"Command failed: {' '.join(cmd)}\n"
+            f"STDERR:\n{p.stderr[-4000:]}\n\nSTDOUT:\n{p.stdout[-4000:]}"
+        )
+    return p.stdout
+
+def handler(job):
+    inp = job.get("input", {})
+    image_urls = inp.get("image_urls", [])
+    tour_id = inp.get("tour_id", "unknown")
+    iterations = str(inp.get("iterations", 3000))
+
+    if not image_urls:
+        return {"error": "No image_urls provided"}
+
+    job_id = str(uuid.uuid4())[:8]
+    work_dir = Path(f"/tmp/gs_{tour_id}_{job_id}")
+    images_dir = work_dir / "input_images"
+    dataset_dir = work_dir / "dataset"
+    out_dir = work_dir / "output"
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1) Download images
+    download_images(image_urls, images_dir)
+
+    # 2) Prepare dataset structure: dataset/images
+    (dataset_dir / "images").mkdir(parents=True, exist_ok=True)
+    for f in images_dir.glob("*.jpg"):
+        shutil.copy2(f, dataset_dir / "images" / f.name)
+
+    # 3) Convert (COLMAP step). This may fail if COLMAP is not installed.
+    run(["python", "convert.py", "-s", str(dataset_dir)], cwd=GS_DIR)
+
+    # 4) Train
+    out_dir.mkdir(parents=True, exist_ok=True)
+    run(
+        ["python", "train.py", "-s", str(dataset_dir), "-m", str(out_dir), "--iterations", iterations],
+        cwd=GS_DIR
+    )
+
+    # 5) Zip output directory
+    zip_base = work_dir / f"{tour_id}_output_{job_id}"
+    zip_path = Path(shutil.make_archive(str(zip_base), "zip", root_dir=out_dir))
+
+    # 6) Upload zip
+    object_path = f"splats/{tour_id}/output_{job_id}.zip"
+    public_url = upload_to_supabase(zip_path, object_path)
+
+    return {"tour_id": tour_id, "result_zip_url": public_url, "job_id": job_id}
+
+runpod.serverless.start({"handler": handler})
