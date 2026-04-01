@@ -1,46 +1,52 @@
-FROM runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04
+FROM nvidia/cuda:11.8.0-devel-ubuntu22.04
 
+ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /workspace
 
+# System deps + Python
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip python3-dev \
     git ca-certificates zip ffmpeg \
     build-essential cmake ninja-build \
     && rm -rf /var/lib/apt/lists/*
 
-# 1) Pin NumPy (قبل أي installs)
-RUN python -m pip install --no-cache-dir --upgrade pip \
- && pip install --no-cache-dir "numpy<2"
+RUN python3 -m pip install --no-cache-dir --upgrade pip
 
-# 2) Clone gaussian-splatting + submodules
+# Pin numpy to <2 (very important)
+RUN pip install --no-cache-dir "numpy<2"
+
+# Install PyTorch CUDA 11.8 wheels
+RUN pip install --no-cache-dir \
+    torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 \
+    --index-url https://download.pytorch.org/whl/cu118
+
+# Clone gaussian-splatting + submodules
 RUN git clone --depth 1 https://github.com/graphdeco-inria/gaussian-splatting.git /workspace/gaussian-splatting
 WORKDIR /workspace/gaussian-splatting
 RUN git submodule update --init --recursive
 
-# 3) Install python deps WITHOUT pulling numpy>=2
-# - تجنب opencv-python لأنه بيطلب numpy>=2 في اللوج عندك
-# - هنستخدم opencv-python-headless (غالبًا أقل مشاكل) + نثبت numpy<2 بعدها
+# Python deps (headless OpenCV)
 RUN pip install --no-cache-dir \
-    tqdm pillow imageio scipy matplotlib \
-    opencv-python-headless
+    tqdm pillow imageio scipy matplotlib opencv-python-headless
 
-# Re-assert numpy pin (لأن أي package ممكن يغيره)
+# Re-assert numpy pin (opencv may try to pull numpy>=2)
 RUN pip install --no-cache-dir --force-reinstall "numpy<2"
 
-# 4) Build CUDA extensions with NO build isolation so torch is visible
+# Build CUDA extensions
+RUN pip install --no-cache-dir "setuptools<70" wheel pybind11
 RUN pip install --no-cache-dir --no-build-isolation -e submodules/diff-gaussian-rasterization
 RUN pip install --no-cache-dir --no-build-isolation -e submodules/simple-knn
 
-# 5) Serverless deps (وتتضمن numpy<2 كمان)
+# Serverless deps
 WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Final sanity check
-RUN python -c "import torch; print('TORCH_OK', torch.__version__)" \
- && python -c "import numpy as np; print('NUMPY_OK', np.__version__)" \
- && python -c "import diff_gaussian_rasterization; print('DGR_OK')" \
- && python -c "import simple_knn; print('SKNN_OK')"
+# Sanity checks during build
+RUN python3 -c "import torch; print('TORCH', torch.__version__, torch.version.cuda)" \
+ && python3 -c "import numpy as np; print('NUMPY', np.__version__)" \
+ && python3 -c "import diff_gaussian_rasterization; print('DGR_OK')" \
+ && python3 -c "import simple_knn; print('SKNN_OK')"
 
 COPY handler.py /app/handler.py
-CMD ["python", "/app/handler.py"]
-
+CMD ["python3", "/app/handler.py"]
