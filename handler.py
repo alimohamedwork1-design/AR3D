@@ -59,7 +59,7 @@ def handler(job):
         "--iterations", iterations,
         "--model_path", str(out_dir),
     ]
-    result = subprocess.run(cmd, cwd="/workspace", capture_output=True, text=True)
+    result = subprocess.run(cmd, cwd="/workspace/gs", capture_output=True, text=True)
 
     if result.returncode != 0:
         return {
