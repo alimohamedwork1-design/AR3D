@@ -62,12 +62,13 @@ def handler(job):
     # 1) Download images
     download_images(image_urls, images_dir)
 
-    # 2) Prepare dataset structure: dataset/images
+    # 2) Prepare dataset structure expected by gaussian-splatting: dataset/images
     (dataset_dir / "images").mkdir(parents=True, exist_ok=True)
     for f in images_dir.glob("*.jpg"):
         shutil.copy2(f, dataset_dir / "images" / f.name)
 
-    # 3) Convert (COLMAP step). This may fail if COLMAP is not installed.
+    # 3) Convert (COLMAP step)
+    # لو ظهر: "colmap: command not found" -> هنضيف COLMAP للـ Dockerfile
     run(["python", "convert.py", "-s", str(dataset_dir)], cwd=GS_DIR)
 
     # 4) Train
