@@ -37,7 +37,8 @@ RUN git submodule update --init --recursive
 
 # Python deps (headless OpenCV)
 RUN pip install --no-cache-dir \
-    tqdm pillow imageio scipy matplotlib opencv-python-headless
+    tqdm pillow imageio scipy matplotlib opencv-python-headless plyfile
+
 
 # Re-assert numpy pin (opencv may try to pull numpy>=2)
 RUN pip install --no-cache-dir --force-reinstall "numpy<2"
