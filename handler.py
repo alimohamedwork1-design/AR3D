@@ -72,6 +72,20 @@ run(["bash", "-lc", "which colmap && colmap --version"], cwd=GS_DIR)
 
 run(["python3", "convert.py", "-s", str(dataset_dir)], cwd=GS_DIR)
 
+# Verify COLMAP output exists (required for train.py)
+sparse0 = dataset_dir / "sparse" / "0"
+if not sparse0.exists():
+    listing = subprocess.check_output(
+        ["bash", "-lc", f"ls -R {dataset_dir} | head -n 250"],
+        text=True
+    )
+    return {
+        "error": "convert.py did not produce sparse/0 (COLMAP output). Scene type not recognized.",
+        "dataset_dir": str(dataset_dir),
+        "dataset_listing": listing
+    }
+
+
 # Debug: اعرض أهم الملفات اللي اتعملت بعد convert
 run(["bash", "-lc", f"ls -R {dataset_dir} | head -n 200"], cwd=GS_DIR)
 
