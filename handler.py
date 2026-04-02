@@ -67,16 +67,21 @@ def handler(job):
     for f in images_dir.glob("*.jpg"):
         shutil.copy2(f, dataset_dir / "images" / f.name)
 
-    # 3) Convert (COLMAP step)
-    # لو ظهر: "colmap: command not found" -> هنضيف COLMAP للـ Dockerfile
-    run(["python3", "convert.py", "-s", str(dataset_dir)], cwd=GS_DIR)
+   # 3) Convert (COLMAP step) + تأكد إن colmap موجود
+run(["bash", "-lc", "which colmap && colmap --version"], cwd=GS_DIR)
 
-    # 4) Train
-    out_dir.mkdir(parents=True, exist_ok=True)
-    run(
-        ["python3", "train.py", "-s", str(dataset_dir), "-m", str(out_dir), "--iterations", iterations],
-        cwd=GS_DIR
-    )
+run(["python3", "convert.py", "-s", str(dataset_dir)], cwd=GS_DIR)
+
+# Debug: اعرض أهم الملفات اللي اتعملت بعد convert
+run(["bash", "-lc", f"ls -R {dataset_dir} | head -n 200"], cwd=GS_DIR)
+
+# 4) Train
+out_dir.mkdir(parents=True, exist_ok=True)
+run(
+    ["python3", "train.py", "-s", str(dataset_dir), "-m", str(out_dir), "--iterations", iterations],
+    cwd=GS_DIR
+)
+
 
     # 5) Zip output directory
     zip_base = work_dir / f"{tour_id}_output_{job_id}"
