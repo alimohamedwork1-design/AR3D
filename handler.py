@@ -1,6 +1,7 @@
 import os, subprocess, requests, shutil, uuid
 from pathlib import Path
 import runpod
+print("BOOT: handler.py started", flush=True)
 
 GS_DIR = Path("/workspace/gaussian-splatting")
 
@@ -106,5 +107,6 @@ run(
     public_url = upload_to_supabase(zip_path, object_path)
 
     return {"tour_id": tour_id, "result_zip_url": public_url, "job_id": job_id}
+print("BOOT: starting runpod serverless", flush=True)
 
 runpod.serverless.start({"handler": handler})
