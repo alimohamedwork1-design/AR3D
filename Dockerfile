@@ -61,4 +61,5 @@ RUN python3 -c "import numpy as np; print('NUMPY', np.__version__)" \
  && python3 -c "from plyfile import PlyData; print('PLY_OK')"
 
 COPY handler.py /app/handler.py
-CMD ["python3", "/app/handler.py"]
+CMD ["bash", "-lc", "set -euxo pipefail; ls -lah /app; python3 /app/handler.py"]
+
