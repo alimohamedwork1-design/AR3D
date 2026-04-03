@@ -8,8 +8,9 @@ GS_DIR = Path("/workspace/gaussian-splatting")
 def download_images(image_urls, images_dir: Path):
     images_dir.mkdir(parents=True, exist_ok=True)
     for i, url in enumerate(image_urls):
-        r = requests.get(url, timeout=120)
-        r.raise_for_status()
+       r = requests.get(url, timeout=120)
+if r.status_code != 200:
+    raise RuntimeError(f"Download failed: {r.status_code} url={url} body={r.text[:300]}")
         (images_dir / f"img_{i:04d}.jpg").write_bytes(r.content)
 
 def upload_to_supabase(file_path: Path, object_path: str) -> str:
@@ -99,8 +100,9 @@ run(
 
 
     # 5) Zip output directory
-    zip_base = work_dir / f"{tour_id}_output_{job_id}"
-    zip_path = Path(shutil.make_archive(str(zip_base), "zip", root_dir=out_dir))
+zip_base = work_dir / f"{tour_id}_output_{job_id}"
+zip_path = Path(shutil.make_archive(str(zip_base), "zip", root_dir=out_dir))
+
 
     # 6) Upload zip
     object_path = f"splats/{tour_id}/output_{job_id}.zip"
