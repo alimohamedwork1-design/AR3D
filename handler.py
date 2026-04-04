@@ -1,114 +1,175 @@
-import os, subprocess, requests, shutil, uuid
-from pathlib import Path
 import runpod
-print("BOOT: handler.py started", flush=True)
+import os
+import requests
+import subprocess
+import shutil
+from pathlib import Path
 
-GS_DIR = Path("/workspace/gaussian-splatting")
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
-def download_images(image_urls, images_dir: Path):
+def download_images(image_urls, work_dir):
+    """Download images from URLs to local directory"""
+    images_dir = work_dir / "input" / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
+    
+    downloaded = 0
     for i, url in enumerate(image_urls):
-       r = requests.get(url, timeout=120)
-if r.status_code != 200:
-    raise RuntimeError(f"Download failed: {r.status_code} url={url} body={r.text[:300]}")
-        (images_dir / f"img_{i:04d}.jpg").write_bytes(r.content)
+        try:
+            r = requests.get(url, timeout=30)
+            if r.status_code == 200:
+                ext = url.split(".")[-1].lower()
+                if ext not in ["jpg", "jpeg", "png"]:
+                    ext = "jpg"
+                filepath = images_dir / f"img_{i:04d}.{ext}"
+                with open(filepath, "wb") as f:
+                    f.write(r.content)
+                downloaded += 1
+        except Exception as e:
+            print(f"Failed to download {url}: {e}")
+    
+    print(f"Downloaded {downloaded}/{len(image_urls)} images")
+    return images_dir, downloaded
 
-def upload_to_supabase(file_path: Path, object_path: str) -> str:
-    supabase_url = os.environ["SUPABASE_URL"].rstrip("/")
-    supabase_key = os.environ["SUPABASE_KEY"]
+def run_colmap(work_dir):
+    """Run COLMAP for camera pose estimation"""
+    db_path = work_dir / "colmap.db"
+    sparse_dir = work_dir / "sparse"
+    sparse_dir.mkdir(exist_ok=True)
+    images_dir = work_dir / "input" / "images"
 
-    headers = {
-        "Authorization": f"Bearer {supabase_key}",
-        "apikey": supabase_key,
-        "Content-Type": "application/zip",
-    }
+    # Feature extraction
+    subprocess.run([
+        "colmap", "feature_extractor",
+        "--database_path", str(db_path),
+        "--image_path", str(images_dir),
+        "--ImageReader.single_camera", "1",
+        "--SiftExtraction.use_gpu", "1"
+    ], check=True, capture_output=True)
 
-    with file_path.open("rb") as f:
-        resp = requests.post(
-            f"{supabase_url}/storage/v1/object/{object_path}",
-            headers=headers,
-            data=f,
-            timeout=600,
+    # Feature matching
+    subprocess.run([
+        "colmap", "exhaustive_matcher",
+        "--database_path", str(db_path),
+        "--SiftMatching.use_gpu", "1"
+    ], check=True, capture_output=True)
+
+    # Reconstruction
+    subprocess.run([
+        "colmap", "mapper",
+        "--database_path", str(db_path),
+        "--image_path", str(images_dir),
+        "--output_path", str(sparse_dir)
+    ], check=True, capture_output=True)
+
+    print("COLMAP done")
+    return sparse_dir
+
+def run_gaussian_splatting(work_dir, iterations=3000):
+    """Run Gaussian Splatting training"""
+    output_dir = work_dir / "output"
+    output_dir.mkdir(exist_ok=True)
+    
+    gs_path = Path("/workspace/gaussian-splatting/train.py")
+    
+    result = subprocess.run([
+        "python", str(gs_path),
+        "-s", str(work_dir / "input"),
+        "--model_path", str(output_dir),
+        "--iterations", str(iterations),
+        "--quiet"
+    ], capture_output=True, text=True, cwd="/workspace/gaussian-splatting")
+    
+    if result.returncode != 0:
+        print("GS Error:", result.stderr[-2000:])
+        raise Exception(f"Gaussian Splatting failed: {result.stderr[-500:]}")
+    
+    print("Gaussian Splatting done")
+    return output_dir
+
+def upload_to_supabase(file_path, tour_id):
+    """Upload result file to Supabase storage"""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise Exception("Supabase credentials not set")
+    
+    bucket = "splats"
+    filename = f"{tour_id}/point_cloud.ply"
+    upload_url = f"{SUPABASE_URL}/storage/v1/object/{bucket}/{filename}"
+    
+    with open(file_path, "rb") as f:
+        response = requests.post(
+            upload_url,
+            headers={
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+                "Content-Type": "application/octet-stream"
+            },
+            data=f
         )
-
-    if resp.status_code >= 300:
-        raise RuntimeError(f"Supabase upload failed: {resp.status_code} {resp.text}")
-
-    return f"{supabase_url}/storage/v1/object/public/{object_path}"
-
-def run(cmd, cwd: Path):
-    p = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True)
-    if p.returncode != 0:
-        raise RuntimeError(
-            f"Command failed: {' '.join(cmd)}\n"
-            f"STDERR:\n{p.stderr[-4000:]}\n\nSTDOUT:\n{p.stdout[-4000:]}"
-        )
-    return p.stdout
+    
+    if response.status_code not in [200, 201]:
+        raise Exception(f"Upload failed: {response.text}")
+    
+    public_url = f"{SUPABASE_URL}/storage/v1/object/public/{bucket}/{filename}"
+    return public_url
 
 def handler(job):
-    inp = job.get("input", {})
-    image_urls = inp.get("image_urls", [])
-    tour_id = inp.get("tour_id", "unknown")
-    iterations = str(inp.get("iterations", 3000))
-
+    """Main RunPod handler"""
+    job_input = job.get("input", {})
+    image_urls = job_input.get("image_urls", [])
+    tour_id = job_input.get("tour_id", "unknown")
+    iterations = job_input.get("iterations", 3000)
+    
+    print(f"Starting job: tour_id={tour_id}, images={len(image_urls)}")
+    
     if not image_urls:
         return {"error": "No image_urls provided"}
+    
+    if len(image_urls) < 10:
+        return {"error": f"Need at least 10 images, got {len(image_urls)}"}
+    
+    work_dir = Path(f"/tmp/job_{tour_id}")
+    
+    try:
+        # 1. Download images
+        images_dir, downloaded = download_images(image_urls, work_dir)
+        if downloaded < 10:
+            return {"error": f"Only {downloaded} images downloaded successfully"}
+        
+        # 2. Run COLMAP
+        print("Running COLMAP...")
+        run_colmap(work_dir)
+        
+        # 3. Run Gaussian Splatting
+        print(f"Running Gaussian Splatting ({iterations} iterations)...")
+        output_dir = run_gaussian_splatting(work_dir, iterations)
+        
+        # 4. Find output file
+        ply_files = list(output_dir.rglob("point_cloud.ply"))
+        if not ply_files:
+            return {"error": "No output file generated"}
+        
+        output_file = ply_files[0]
+        print(f"Output file: {output_file} ({output_file.stat().st_size} bytes)")
+        
+        # 5. Upload to Supabase
+        print("Uploading to Supabase...")
+        splat_url = upload_to_supabase(output_file, tour_id)
+        
+        return {
+            "success": True,
+            "splat_url": splat_url,
+            "tour_id": tour_id,
+            "images_processed": downloaded
+        }
+        
+    except Exception as e:
+        print(f"Job failed: {e}")
+        return {"error": str(e)}
+    
+    finally:
+        # Cleanup
+        if work_dir.exists():
+            shutil.rmtree(work_dir, ignore_errors=True)
 
-    job_id = str(uuid.uuid4())[:8]
-    work_dir = Path(f"/tmp/gs_{tour_id}_{job_id}")
-    images_dir = work_dir / "input_images"
-    dataset_dir = work_dir / "dataset"
-    out_dir = work_dir / "output"
-    work_dir.mkdir(parents=True, exist_ok=True)
-
-    # 1) Download images
-    download_images(image_urls, images_dir)
-
-    # 2) Prepare dataset structure expected by gaussian-splatting: dataset/images
-    (dataset_dir / "images").mkdir(parents=True, exist_ok=True)
-    for f in images_dir.glob("*.jpg"):
-        shutil.copy2(f, dataset_dir / "images" / f.name)
-
-   # 3) Convert (COLMAP step) + تأكد إن colmap موجود
-run(["bash", "-lc", "which colmap && colmap --version"], cwd=GS_DIR)
-
-run(["python3", "convert.py", "-s", str(dataset_dir)], cwd=GS_DIR)
-
-# Verify COLMAP output exists (required for train.py)
-sparse0 = dataset_dir / "sparse" / "0"
-if not sparse0.exists():
-    listing = subprocess.check_output(
-        ["bash", "-lc", f"ls -R {dataset_dir} | head -n 250"],
-        text=True
-    )
-    return {
-        "error": "convert.py did not produce sparse/0 (COLMAP output). Scene type not recognized.",
-        "dataset_dir": str(dataset_dir),
-        "dataset_listing": listing
-    }
-
-
-# Debug: اعرض أهم الملفات اللي اتعملت بعد convert
-run(["bash", "-lc", f"ls -R {dataset_dir} | head -n 200"], cwd=GS_DIR)
-
-# 4) Train
-out_dir.mkdir(parents=True, exist_ok=True)
-run(
-    ["python3", "train.py", "-s", str(dataset_dir), "-m", str(out_dir), "--iterations", iterations],
-    cwd=GS_DIR
-)
-
-
-    # 5) Zip output directory
-zip_base = work_dir / f"{tour_id}_output_{job_id}"
-zip_path = Path(shutil.make_archive(str(zip_base), "zip", root_dir=out_dir))
-
-
-    # 6) Upload zip
-    object_path = f"splats/{tour_id}/output_{job_id}.zip"
-    public_url = upload_to_supabase(zip_path, object_path)
-
-    return {"tour_id": tour_id, "result_zip_url": public_url, "job_id": job_id}
-print("BOOT: starting runpod serverless", flush=True)
-
+# Start RunPod serverless
 runpod.serverless.start({"handler": handler})
