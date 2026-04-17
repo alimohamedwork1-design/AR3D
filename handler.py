@@ -5,8 +5,8 @@ import subprocess
 import shutil
 from pathlib import Path
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+SUPABASE_URL = os.environ.get("https://ecypnsmehlznwbfongxt.supabase.co", "")
+SUPABASE_KEY = os.environ.get("sb_publishable_g2lFyE11sRT9GvDeCIQHpw_dqiBT-GG", "")
 
 def download_images(image_urls, work_dir):
     """Download images from URLs to local directory"""
@@ -49,7 +49,7 @@ def run_colmap(work_dir):
 
     # Feature matching
     subprocess.run([
-        "colmap", "exhaustive_matcher",
+       "colmap", "sequential_matcher",
         "--database_path", str(db_path),
         "--SiftMatching.use_gpu", "1"
     ], check=True, capture_output=True)
@@ -65,7 +65,7 @@ def run_colmap(work_dir):
     print("COLMAP done")
     return sparse_dir
 
-def run_gaussian_splatting(work_dir, iterations=3000):
+def run_gaussian_splatting(work_dir, iterations=500):
     """Run Gaussian Splatting training"""
     output_dir = work_dir / "output"
     output_dir.mkdir(exist_ok=True)
@@ -117,8 +117,7 @@ def handler(job):
     job_input = job.get("input", {})
     image_urls = job_input.get("image_urls", [])
     tour_id = job_input.get("tour_id", "unknown")
-    iterations = job_input.get("iterations", 3000)
-    
+    iterations = job_input.get("iterations", 500)    
     print(f"Starting job: tour_id={tour_id}, images={len(image_urls)}")
     
     if not image_urls:
@@ -127,7 +126,7 @@ def handler(job):
     if len(image_urls) < 10:
         return {"error": f"Need at least 10 images, got {len(image_urls)}"}
     
-    work_dir = Path(f"/tmp/job_{tour_id}")
+    work_dir = Path(f"/workspace/job_{tour_id}")
     
     try:
         # 1. Download images
