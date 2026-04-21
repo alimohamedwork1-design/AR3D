@@ -207,8 +207,10 @@ def run_colmap(work_dir: Path) -> Path:
 
 
 def run_gaussian_splatting(gs_source: Path, iterations: int = 500) -> Path:
-    output_dir = work_dir / "output"
-    output_dir.mkdir(exist_ok=True)
+    # gs_source is e.g. /workspace/job_<id>/input_undist
+    work_root = gs_source.parent
+    output_dir = work_root / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     gs_path = Path("/workspace/gaussian-splatting/train.py")
     if not gs_path.exists():
