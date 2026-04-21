@@ -16,16 +16,22 @@ SUPABASE_SERVICE_ROLE_KEY = (os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or "").
 COLMAP_USE_GPU_DEFAULT = os.environ.get("COLMAP_USE_GPU", "1").strip()  # "1" or "0"
 COLMAP_MAX_IMAGE_SIZE = os.environ.get("COLMAP_MAX_IMAGE_SIZE", "2000").strip()  # pixels
 COLMAP_SINGLE_CAMERA = os.environ.get("COLMAP_SINGLE_CAMERA", "1").strip()  # "1" or "0"
+QT_QPA_PLATFORM = os.environ.get("QT_QPA_PLATFORM", "offscreen").strip()  # offscreen|minimal
 
 
-def _run(cmd: list[str], *, cwd: Optional[str] = None) -> str:
+def _run(cmd: list[str], *, cwd: Optional[str] = None, env: Optional[dict[str, str]] = None) -> str:
     """
     Run a command and return combined stdout/stderr (trimmed).
     Raises CalledProcessError on non-zero exit.
     """
+    merged_env = os.environ.copy()
+    if env:
+        merged_env.update({k: str(v) for k, v in env.items() if v is not None})
+
     p = subprocess.run(
         cmd,
         cwd=cwd,
+        env=merged_env,
         text=True,
         capture_output=True,
         check=True,
@@ -76,6 +82,11 @@ def run_colmap(work_dir: Path) -> Path:
 
     def attempt(use_gpu: bool) -> None:
         gpu_flag = "1" if use_gpu else "0"
+        # Ensure headless execution; prevents Qt/X11 SIGABRT on serverless workers.
+        colmap_env = {
+            "QT_QPA_PLATFORM": QT_QPA_PLATFORM or "offscreen",
+            "DISPLAY": "",
+        }
         print(f"[colmap] feature_extractor use_gpu={gpu_flag} max_image_size={COLMAP_MAX_IMAGE_SIZE}")
         _run(
             [
@@ -91,7 +102,8 @@ def run_colmap(work_dir: Path) -> Path:
                 gpu_flag,
                 "--SiftExtraction.max_image_size",
                 str(COLMAP_MAX_IMAGE_SIZE),
-            ]
+            ],
+            env=colmap_env,
         )
 
         print(f"[colmap] sequential_matcher use_gpu={gpu_flag}")
@@ -103,7 +115,8 @@ def run_colmap(work_dir: Path) -> Path:
                 str(db_path),
                 "--SiftMatching.use_gpu",
                 gpu_flag,
-            ]
+            ],
+            env=colmap_env,
         )
 
         print("[colmap] mapper")
@@ -117,7 +130,8 @@ def run_colmap(work_dir: Path) -> Path:
                 str(images_dir),
                 "--output_path",
                 str(sparse_root),
-            ]
+            ],
+            env=colmap_env,
         )
 
     # Try GPU first (if enabled), then CPU fallback for stability.
