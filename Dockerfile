@@ -20,11 +20,12 @@ RUN git clone --depth 1 --recursive https://github.com/graphdeco-inria/gaussian-
 
 # Core Python deps + gaussian-splatting CUDA extensions
 RUN pip install --no-cache-dir plyfile tqdm "numpy<2" scipy
-RUN pip install --no-cache-dir -r /workspace/gaussian-splatting/requirements.txt
+RUN pip install --no-cache-dir opencv-python joblib
 
 # Build CUDA extensions (separate layers so build logs are clear)
 RUN pip install --no-cache-dir -v --no-build-isolation /workspace/gaussian-splatting/submodules/diff-gaussian-rasterization
 RUN pip install --no-cache-dir -v --no-build-isolation /workspace/gaussian-splatting/submodules/simple-knn
+RUN pip install --no-cache-dir -v --no-build-isolation /workspace/gaussian-splatting/submodules/fused-ssim
 
 COPY handler.py /workspace/handler.py
 
