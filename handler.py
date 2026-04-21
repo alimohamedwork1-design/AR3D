@@ -47,6 +47,49 @@ def _is_sigabrt(err: BaseException) -> bool:
     return err.returncode in (-6, 134)
 
 
+def ensure_colmap_sparse_zero_layout(dataset_root: Path) -> None:
+    """
+    GraphDeco gaussian-splatting expects COLMAP files under sparse/0/
+    (cameras/images/points3D as .txt or .bin).
+
+    `colmap image_undistorter` often writes the model directly under sparse/ instead of sparse/0/.
+    """
+    sparse = dataset_root / "sparse"
+    if not sparse.is_dir():
+        raise RuntimeError(f"colmap_missing_sparse: {sparse}")
+
+    zero = sparse / "0"
+    colmap_names = (
+        "cameras.bin",
+        "images.bin",
+        "points3D.bin",
+        "cameras.txt",
+        "images.txt",
+        "points3D.txt",
+    )
+
+    def has_any_model_files(p: Path) -> bool:
+        return any((p / n).is_file() for n in colmap_names)
+
+    if has_any_model_files(zero):
+        return
+
+    # Undistorted COLMAP: files live in sparse/ (flat); move into sparse/0/
+    if has_any_model_files(sparse):
+        zero.mkdir(parents=True, exist_ok=True)
+        for name in colmap_names:
+            src = sparse / name
+            if src.is_file():
+                dst = zero / name
+                if dst.exists():
+                    dst.unlink()
+                shutil.move(str(src), str(dst))
+        print(f"[colmap] moved COLMAP model into {zero}")
+        return
+
+    raise RuntimeError(f"colmap_sparse_layout_unrecognized: {sparse}")
+
+
 def download_images(image_urls: Iterable[str], work_dir: Path) -> Tuple[Path, int]:
     images_dir = work_dir / "input" / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
@@ -176,6 +219,7 @@ def run_colmap(work_dir: Path) -> Path:
             ],
             env=colmap_env,
         )
+        ensure_colmap_sparse_zero_layout(undist_dir)
         return undist_dir
 
     # Try GPU first (if enabled), then CPU fallback for stability.
