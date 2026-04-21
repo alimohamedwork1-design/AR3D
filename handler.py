@@ -64,10 +64,15 @@ def download_images(image_urls: Iterable[str], work_dir: Path) -> Tuple[Path, in
 
 
 def run_colmap(work_dir: Path) -> Path:
-    db_path = work_dir / "colmap.db"
-    sparse_dir = work_dir / "sparse"
-    sparse_dir.mkdir(exist_ok=True)
-    images_dir = work_dir / "input" / "images"
+    # gaussian-splatting expects COLMAP outputs under the dataset root:
+    #   <dataset>/images
+    #   <dataset>/sparse/0
+    dataset_dir = work_dir / "input"
+    images_dir = dataset_dir / "images"
+    sparse_root = dataset_dir / "sparse"
+    sparse_root.mkdir(parents=True, exist_ok=True)
+    # COLMAP mapper writes to <output_path>/<model_id>/..., we ensure at least "0" exists.
+    db_path = dataset_dir / "colmap.db"
 
     def attempt(use_gpu: bool) -> None:
         gpu_flag = "1" if use_gpu else "0"
@@ -111,7 +116,7 @@ def run_colmap(work_dir: Path) -> Path:
                 "--image_path",
                 str(images_dir),
                 "--output_path",
-                str(sparse_dir),
+                str(sparse_root),
             ]
         )
 
@@ -121,7 +126,7 @@ def run_colmap(work_dir: Path) -> Path:
         try:
             attempt(True)
             print("[colmap] done (gpu)")
-            return sparse_dir
+            return sparse_root
         except subprocess.CalledProcessError as e:
             print(f"[colmap] gpu failed returncode={e.returncode}")
             tail = ((e.stderr or "")[-1500:]).strip()
@@ -136,7 +141,7 @@ def run_colmap(work_dir: Path) -> Path:
     # CPU attempt
     attempt(False)
     print("[colmap] done (cpu)")
-    return sparse_dir
+    return sparse_root
 
 
 def run_gaussian_splatting(work_dir: Path, iterations: int = 500) -> Path:
