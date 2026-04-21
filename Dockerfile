@@ -28,9 +28,10 @@ RUN python -c "import torch; print('torch', torch.__version__, 'cuda', torch.ver
   nvcc --version
 
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
-  pip install --no-cache-dir pybind11
+  pip install --no-cache-dir "pybind11>=2.12"
 
-RUN pip install --no-cache-dir plyfile tqdm "numpy<2" scipy
+RUN pip install --no-cache-dir --upgrade --force-reinstall "numpy<2" && \
+  pip install --no-cache-dir plyfile tqdm scipy
 RUN pip install --no-cache-dir opencv-python joblib
 
 # Build CUDA extensions (separate layers so build logs are clear)
