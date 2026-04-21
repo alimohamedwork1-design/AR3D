@@ -8,9 +8,24 @@ import requests
 import runpod
 
 
-SUPABASE_URL = (os.environ.get("SUPABASE_URL") or "").strip()
-# Use service role for Storage uploads from server-side workers.
-SUPABASE_SERVICE_ROLE_KEY = (os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
+def _supabase_credentials() -> tuple[str, str]:
+    """
+    Read at call time (not only import) so RunPod-injected env is visible.
+    Service role is required for Storage PUT from the worker (not the anon key).
+    """
+    url = (
+        os.environ.get("SUPABASE_URL")
+        or os.environ.get("NEXT_PUBLIC_SUPABASE_URL")
+        or os.environ.get("EXPO_PUBLIC_SUPABASE_URL")
+        or ""
+    ).strip()
+    key = (
+        os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+        or os.environ.get("SUPABASE_SERVICE_KEY")
+        or os.environ.get("SERVICE_ROLE_KEY")
+        or ""
+    ).strip()
+    return url, key
 
 # COLMAP tuning
 COLMAP_USE_GPU_DEFAULT = os.environ.get("COLMAP_USE_GPU", "1").strip()  # "1" or "0"
@@ -286,16 +301,23 @@ def run_gaussian_splatting(gs_source: Path, iterations: int = 500) -> Path:
 
 
 def upload_to_supabase(local_path: Path, remote_path: str) -> str:
-    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-        raise RuntimeError("missing_supabase_env: SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY")
+    supabase_url, service_role = _supabase_credentials()
+    missing = [n for n, v in [("SUPABASE_URL", supabase_url), ("SUPABASE_SERVICE_ROLE_KEY", service_role)] if not v]
+    if missing:
+        raise RuntimeError(
+            "missing_supabase_env: "
+            + ", ".join(missing)
+            + ". Set these on RunPod: Serverless → your endpoint → Environment / Secrets "
+            "(Dashboard → API: Project URL + service_role key; never use anon key here)."
+        )
 
     # Storage upload endpoint expects PUT.
-    url = f"{SUPABASE_URL}/storage/v1/object/{remote_path.lstrip('/')}"
+    url = f"{supabase_url}/storage/v1/object/{remote_path.lstrip('/')}"
     with local_path.open("rb") as f:
         resp = requests.put(
             url,
             headers={
-                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                "Authorization": f"Bearer {service_role}",
                 "Content-Type": "application/octet-stream",
                 "x-upsert": "true",
             },
@@ -306,7 +328,7 @@ def upload_to_supabase(local_path: Path, remote_path: str) -> str:
         raise RuntimeError(f"supabase_upload_failed: http={resp.status_code} body={resp.text[:400]}")
 
     # If bucket is public you can use public URL; otherwise this is just a stable path to sign later.
-    return f"{SUPABASE_URL}/storage/v1/object/public/{remote_path.lstrip('/')}"
+    return f"{supabase_url}/storage/v1/object/public/{remote_path.lstrip('/')}"
 
 
 def handler(job):
