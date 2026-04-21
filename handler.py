@@ -52,6 +52,7 @@ def download_images(image_urls: Iterable[str], work_dir: Path) -> Tuple[Path, in
     images_dir.mkdir(parents=True, exist_ok=True)
 
     downloaded = 0
+    total_urls = len(image_urls) if hasattr(image_urls, "__len__") else None
     for i, url in enumerate(image_urls):
         try:
             r = requests.get(url, timeout=60)
@@ -65,7 +66,7 @@ def download_images(image_urls: Iterable[str], work_dir: Path) -> Tuple[Path, in
         except Exception as e:
             print(f"[download] failed url={url} err={e}")
 
-    print(f"[download] downloaded {downloaded} / {len(list(image_urls)) if hasattr(image_urls,'__len__') else 'n/a'}")
+    print(f"[download] downloaded {downloaded} / {total_urls if total_urls is not None else 'n/a'}")
     return images_dir, downloaded
 
 
@@ -134,13 +135,55 @@ def run_colmap(work_dir: Path) -> Path:
             env=colmap_env,
         )
 
+    def pick_sparse_model_dir() -> Path:
+        # COLMAP mapper writes sparse/<model_id>/...
+        candidates = [p for p in sparse_root.iterdir() if p.is_dir()]
+        if not candidates:
+            raise RuntimeError("colmap_sparse_empty")
+        # Prefer model id "0" if present.
+        zero = sparse_root / "0"
+        if zero.exists() and zero.is_dir():
+            return zero
+        # Otherwise pick the largest directory (most files).
+        return max(candidates, key=lambda p: sum(1 for _ in p.rglob("*") if _.is_file()))
+
+    def undistort_to_gs_dataset(sparse_model_dir: Path) -> Path:
+        """
+        GraphDeco gaussian-splatting expects undistorted COLMAP cameras (PINHOLE / SIMPLE_PINHOLE).
+        """
+        undist_dir = work_dir / "input_undist"
+        if undist_dir.exists():
+            shutil.rmtree(undist_dir, ignore_errors=True)
+        undist_dir.mkdir(parents=True, exist_ok=True)
+
+        colmap_env = {
+            "QT_QPA_PLATFORM": QT_QPA_PLATFORM or "offscreen",
+            "DISPLAY": "",
+        }
+        print(f"[colmap] image_undistorter sparse_model={sparse_model_dir}")
+        _run(
+            [
+                "colmap",
+                "image_undistorter",
+                "--image_path",
+                str(images_dir),
+                "--input_path",
+                str(sparse_model_dir),
+                "--output_path",
+                str(undist_dir),
+                "--output_type",
+                "COLMAP",
+            ],
+            env=colmap_env,
+        )
+        return undist_dir
+
     # Try GPU first (if enabled), then CPU fallback for stability.
     want_gpu = COLMAP_USE_GPU_DEFAULT == "1"
     if want_gpu:
         try:
             attempt(True)
-            print("[colmap] done (gpu)")
-            return sparse_root
+            print("[colmap] mapper done (gpu)")
         except subprocess.CalledProcessError as e:
             print(f"[colmap] gpu failed returncode={e.returncode}")
             tail = ((e.stderr or "")[-1500:]).strip()
@@ -149,16 +192,21 @@ def run_colmap(work_dir: Path) -> Path:
             # Fallback on SIGABRT / common GPU crashes.
             if _is_sigabrt(e) or "cuda" in (e.stderr or "").lower() or "out of memory" in (e.stderr or "").lower():
                 print("[colmap] retrying on CPU…")
+                attempt(False)
+                print("[colmap] mapper done (cpu after gpu fail)")
             else:
                 raise
+    else:
+        attempt(False)
+        print("[colmap] mapper done (cpu)")
 
-    # CPU attempt
-    attempt(False)
-    print("[colmap] done (cpu)")
-    return sparse_root
+    sparse_model_dir = pick_sparse_model_dir()
+    gs_dataset = undistort_to_gs_dataset(sparse_model_dir)
+    print(f"[colmap] undistorted dataset ready at {gs_dataset}")
+    return gs_dataset
 
 
-def run_gaussian_splatting(work_dir: Path, iterations: int = 500) -> Path:
+def run_gaussian_splatting(gs_source: Path, iterations: int = 500) -> Path:
     output_dir = work_dir / "output"
     output_dir.mkdir(exist_ok=True)
 
@@ -166,13 +214,13 @@ def run_gaussian_splatting(work_dir: Path, iterations: int = 500) -> Path:
     if not gs_path.exists():
         raise RuntimeError("gaussian-splatting not installed in image")
 
-    print(f"[gs] training iterations={iterations}")
+    print(f"[gs] training iterations={iterations} source={gs_source}")
     p = subprocess.run(
         [
             "python",
             str(gs_path),
             "-s",
-            str(work_dir / "input"),
+            str(gs_source),
             "--model_path",
             str(output_dir),
             "--iterations",
@@ -236,11 +284,11 @@ def handler(job):
 
         # 2) COLMAP (gpu -> cpu fallback)
         print("[job] running COLMAP…")
-        run_colmap(work_dir)
+        gs_source = run_colmap(work_dir)
 
         # 3) Train
         print("[job] running Gaussian Splatting…")
-        out_dir = run_gaussian_splatting(work_dir, iterations)
+        out_dir = run_gaussian_splatting(gs_source, iterations)
 
         # 4) Collect outputs
         ply = next(iter(out_dir.rglob("point_cloud.ply")), None)
