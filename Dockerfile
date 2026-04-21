@@ -28,11 +28,12 @@ RUN python -c "import torch; print('torch', torch.__version__, 'cuda', torch.ver
   nvcc --version
 
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
-  pip install --no-cache-dir "pybind11>=2.12"
-
-RUN pip install --no-cache-dir --upgrade --force-reinstall "numpy<2" && \
+  pip uninstall -y numpy || true && \
+  pip install --no-cache-dir --force-reinstall "numpy==1.26.4" && \
+  pip install --no-cache-dir "pybind11>=2.12" && \
   pip install --no-cache-dir plyfile tqdm scipy
-RUN pip install --no-cache-dir opencv-python joblib
+RUN pip install --no-cache-dir opencv-python joblib && \
+  pip install --no-cache-dir --force-reinstall "numpy==1.26.4"
 
 # Build CUDA extensions (separate layers so build logs are clear)
 RUN pip install --no-cache-dir -v --no-build-isolation /workspace/gaussian-splatting/submodules/diff-gaussian-rasterization
