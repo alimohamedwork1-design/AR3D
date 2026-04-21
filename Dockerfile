@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir \
   requests
 
 RUN git clone --depth 1 https://github.com/graphdeco-inria/gaussian-splatting /workspace/gaussian-splatting
-RUN pip install --no-cache-dir plyfile tqdm scipy numpy<2
+RUN pip install --no-cache-dir plyfile tqdm "numpy<2" scipy
 
 COPY handler.py /workspace/handler.py
 
