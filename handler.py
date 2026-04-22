@@ -433,6 +433,32 @@ def ply_point_cloud_to_glb(ply_path: Path, glb_path: Path) -> None:
     gltf.save_binary(str(glb_path))
 
 
+def downsample_and_rewrite_ply_inplace(ply_path: Path, max_points: int) -> int:
+    """
+    Reduce point count to avoid oversized uploads. Rewrites the PLY in binary format.
+    Returns the resulting point count.
+    """
+    if max_points <= 0:
+        return 0
+
+    ply = PlyData.read(str(ply_path))
+    if "vertex" not in ply:
+        raise RuntimeError("ply_missing_vertex")
+    v = ply["vertex"].data
+    n = len(v)
+    if n <= max_points:
+        # Still rewrite as binary to reduce size if it was ascii.
+        PlyData(ply.elements, text=False).write(str(ply_path))
+        return n
+
+    # Deterministic-ish stride sampling (faster than random, no numpy needed)
+    step = max(1, n // max_points)
+    sampled = v[::step][:max_points]
+    new_ply = PlyData([ply["vertex"].__class__(sampled, "vertex")], text=False)
+    new_ply.write(str(ply_path))
+    return len(sampled)
+
+
 def handler(job):
     job_input = job.get("input", {}) or {}
     image_urls = job_input.get("image_urls", []) or []
@@ -464,6 +490,15 @@ def handler(job):
         ply = next(iter(out_dir.rglob("point_cloud.ply")), None)
         if not ply or not ply.exists():
             return {"ok": False, "error": "no_point_cloud"}
+
+        # Optional size reduction to satisfy Storage max object size (413 Payload too large).
+        # Set via env or input; default keeps a reasonable cap.
+        max_points = int(job_input.get("max_points", os.environ.get("PLY_MAX_POINTS", "500000")) or 500000)
+        try:
+            kept = downsample_and_rewrite_ply_inplace(ply, max_points)
+            print(f"[ply] points={kept} max_points={max_points} size={ply.stat().st_size} bytes")
+        except Exception as e:
+            print(f"[ply] downsample skipped: {e}")
 
         # 5) Convert to GLB (point cloud)
         glb = out_dir / "point_cloud.glb"
