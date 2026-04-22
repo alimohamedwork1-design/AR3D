@@ -6,6 +6,19 @@ from typing import Iterable, Optional, Tuple
 
 import requests
 import runpod
+from plyfile import PlyData
+from pygltflib import (
+    Accessor,
+    Asset,
+    Buffer,
+    BufferView,
+    GLTF2,
+    Mesh,
+    Node,
+    Primitive,
+    Scene,
+)
+import struct
 
 
 def _supabase_credentials() -> tuple[str, str]:
@@ -331,11 +344,100 @@ def upload_to_supabase(local_path: Path, remote_path: str) -> str:
     return f"{supabase_url}/storage/v1/object/public/{remote_path.lstrip('/')}"
 
 
+def ply_point_cloud_to_glb(ply_path: Path, glb_path: Path) -> None:
+    """
+    Convert a point-cloud PLY to a minimal GLB using glTF POINTS primitive.
+    Supports vertex positions and optional RGB colors.
+    """
+    ply = PlyData.read(str(ply_path))
+    if "vertex" not in ply:
+        raise RuntimeError("ply_missing_vertex")
+    v = ply["vertex"]
+    x = v["x"]
+    y = v["y"]
+    z = v["z"]
+    n = len(x)
+    if n <= 0:
+        raise RuntimeError("ply_empty")
+
+    has_color = all(k in v.data.dtype.names for k in ("red", "green", "blue"))
+    # Pack binary buffer: positions (float32*3) then colors (uint8*4) if present.
+    buf = bytearray()
+    for i in range(n):
+        buf += struct.pack("<fff", float(x[i]), float(y[i]), float(z[i]))
+    pos_offset = 0
+    pos_len = len(buf)
+
+    col_offset = None
+    if has_color:
+        # Align to 4 bytes for bufferView
+        while len(buf) % 4 != 0:
+            buf += b"\x00"
+        col_offset = len(buf)
+        for i in range(n):
+            r = int(v["red"][i])
+            g = int(v["green"][i])
+            b = int(v["blue"][i])
+            buf += bytes((r & 255, g & 255, b & 255, 255))
+
+    # Compute bounds
+    minx = float(min(x))
+    miny = float(min(y))
+    minz = float(min(z))
+    maxx = float(max(x))
+    maxy = float(max(y))
+    maxz = float(max(z))
+
+    gltf = GLTF2(asset=Asset(version="2.0"))
+    gltf.buffers = [Buffer(byteLength=len(buf))]
+    gltf.bufferViews = [
+        BufferView(buffer=0, byteOffset=pos_offset, byteLength=pos_len, target=34962),  # ARRAY_BUFFER
+    ]
+    accessors = [
+        Accessor(
+            bufferView=0,
+            byteOffset=0,
+            componentType=5126,  # FLOAT
+            count=n,
+            type="VEC3",
+            min=[minx, miny, minz],
+            max=[maxx, maxy, maxz],
+        )
+    ]
+
+    attributes = {"POSITION": 0}
+    if has_color and col_offset is not None:
+        gltf.bufferViews.append(
+            BufferView(buffer=0, byteOffset=col_offset, byteLength=(n * 4), target=34962)
+        )
+        accessors.append(
+            Accessor(
+                bufferView=1,
+                byteOffset=0,
+                componentType=5121,  # UNSIGNED_BYTE
+                normalized=True,
+                count=n,
+                type="VEC4",
+            )
+        )
+        attributes["COLOR_0"] = 1
+
+    gltf.accessors = accessors
+    prim = Primitive(attributes=attributes, mode=0)  # POINTS
+    gltf.meshes = [Mesh(primitives=[prim])]
+    gltf.nodes = [Node(mesh=0)]
+    gltf.scenes = [Scene(nodes=[0])]
+    gltf.scene = 0
+
+    gltf.set_binary_blob(bytes(buf))
+    gltf.save_binary(str(glb_path))
+
+
 def handler(job):
     job_input = job.get("input", {}) or {}
     image_urls = job_input.get("image_urls", []) or []
     tour_id = str(job_input.get("tour_id", "unknown")).strip()
-    iterations = int(job_input.get("iterations", 500) or 500)
+    iterations = int(job_input.get("iterations", 6000) or 6000)
 
     if not image_urls:
         return {"ok": False, "error": "no_image_urls"}
@@ -363,16 +465,28 @@ def handler(job):
         if not ply or not ply.exists():
             return {"ok": False, "error": "no_point_cloud"}
 
-        # 5) Upload (PLY now; GLB requires a separate conversion/export step)
+        # 5) Convert to GLB (point cloud)
+        glb = out_dir / "point_cloud.glb"
+        try:
+            ply_point_cloud_to_glb(ply, glb)
+        except Exception as e:
+            print(f"[glb] convert failed: {e}")
+            glb = None
+
+        # 6) Upload outputs
         bucket = os.environ.get("SUPABASE_SPLATS_BUCKET", "splats").strip() or "splats"
-        remote = f"{bucket}/{tour_id}/point_cloud.ply"
-        ply_url = upload_to_supabase(ply, remote)
+        ply_remote = f"{bucket}/{tour_id}/point_cloud.ply"
+        ply_url = upload_to_supabase(ply, ply_remote)
+        glb_url = None
+        if glb and isinstance(glb, Path) and glb.exists():
+            glb_remote = f"{bucket}/{tour_id}/point_cloud.glb"
+            glb_url = upload_to_supabase(glb, glb_remote)
 
         return {
             "ok": True,
             "tour_id": tour_id,
             "images_processed": downloaded,
-            "output": {"ply_url": ply_url},
+            "output": {"ply_url": ply_url, "glb_url": glb_url},
         }
     except Exception as e:
         return {"ok": False, "error": str(e)}
