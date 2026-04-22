@@ -31,7 +31,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
   pip uninstall -y numpy || true && \
   pip install --no-cache-dir --force-reinstall "numpy==1.26.4" && \
   pip install --no-cache-dir "pybind11>=2.12" && \
-  pip install --no-cache-dir plyfile tqdm scipy
+  pip install --no-cache-dir plyfile tqdm scipy pygltflib
 RUN pip install --no-cache-dir opencv-python joblib && \
   pip install --no-cache-dir --force-reinstall "numpy==1.26.4"
 
