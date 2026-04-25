@@ -15,6 +15,9 @@ RUN apt-get update && apt-get install -y \
   cmake \
   ninja-build \
   python3-dev \
+  libgl1 \
+  libglib2.0-0 \
+  libgomp1 \
   && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir \
@@ -37,7 +40,7 @@ RUN pip install --no-cache-dir opencv-python joblib && \
 
 # Optional mesh export (Poisson reconstruction) for "complete" GLB meshes.
 # Heavy dependency; kept last so cache churn is limited.
-RUN pip install --no-cache-dir open3d trimesh
+RUN pip install --no-cache-dir "open3d==0.18.0" "trimesh>=4.4.0"
 
 # Build CUDA extensions (separate layers so build logs are clear)
 RUN pip install --no-cache-dir -v --no-build-isolation /workspace/gaussian-splatting/submodules/diff-gaussian-rasterization
