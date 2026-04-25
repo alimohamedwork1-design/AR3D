@@ -46,8 +46,10 @@ def _supabase_credentials() -> tuple[str, str]:
 
 # COLMAP tuning
 COLMAP_USE_GPU_DEFAULT = os.environ.get("COLMAP_USE_GPU", "1").strip()  # "1" or "0"
-COLMAP_MAX_IMAGE_SIZE = os.environ.get("COLMAP_MAX_IMAGE_SIZE", "2000").strip()  # pixels
+# Higher default helps sparse scenes; can override via env or pipeline input.
+COLMAP_MAX_IMAGE_SIZE = os.environ.get("COLMAP_MAX_IMAGE_SIZE", "3200").strip()  # pixels
 COLMAP_SINGLE_CAMERA = os.environ.get("COLMAP_SINGLE_CAMERA", "1").strip()  # "1" or "0"
+COLMAP_MATCHER_DEFAULT = os.environ.get("COLMAP_MATCHER", "").strip().lower()  # exhaustive|sequential
 QT_QPA_PLATFORM = os.environ.get("QT_QPA_PLATFORM", "offscreen").strip()  # offscreen|minimal
 
 
@@ -225,7 +227,7 @@ def download_supabase_objects(
     return images_dir, downloaded
 
 
-def run_colmap(work_dir: Path) -> Path:
+def run_colmap(work_dir: Path, *, matcher: str = "exhaustive", max_image_size: Optional[int] = None) -> Path:
     # gaussian-splatting expects COLMAP outputs under the dataset root:
     #   <dataset>/images
     #   <dataset>/sparse/0
@@ -236,6 +238,11 @@ def run_colmap(work_dir: Path) -> Path:
     # COLMAP mapper writes to <output_path>/<model_id>/..., we ensure at least "0" exists.
     db_path = dataset_dir / "colmap.db"
 
+    matcher_norm = (matcher or "exhaustive").strip().lower()
+    if matcher_norm not in {"exhaustive", "sequential"}:
+        matcher_norm = "exhaustive"
+    max_img = int(max_image_size) if isinstance(max_image_size, int) and max_image_size > 0 else int(COLMAP_MAX_IMAGE_SIZE)
+
     def attempt(use_gpu: bool) -> None:
         gpu_flag = "1" if use_gpu else "0"
         # Ensure headless execution; prevents Qt/X11 SIGABRT on serverless workers.
@@ -243,7 +250,7 @@ def run_colmap(work_dir: Path) -> Path:
             "QT_QPA_PLATFORM": QT_QPA_PLATFORM or "offscreen",
             "DISPLAY": "",
         }
-        print(f"[colmap] feature_extractor use_gpu={gpu_flag} max_image_size={COLMAP_MAX_IMAGE_SIZE}")
+        print(f"[colmap] feature_extractor use_gpu={gpu_flag} max_image_size={max_img} matcher={matcher_norm}")
         _run(
             [
                 "colmap",
@@ -257,16 +264,19 @@ def run_colmap(work_dir: Path) -> Path:
                 "--SiftExtraction.use_gpu",
                 gpu_flag,
                 "--SiftExtraction.max_image_size",
-                str(COLMAP_MAX_IMAGE_SIZE),
+                str(max_img),
             ],
             env=colmap_env,
         )
 
-        print(f"[colmap] sequential_matcher use_gpu={gpu_flag}")
+        # For photo bursts (unordered), exhaustive matching is much more robust than sequential.
+        # Sequential matching is appropriate for video-like ordered frames.
+        matcher_cmd = "exhaustive_matcher" if matcher_norm == "exhaustive" else "sequential_matcher"
+        print(f"[colmap] {matcher_cmd} use_gpu={gpu_flag}")
         _run(
             [
                 "colmap",
-                "sequential_matcher",
+                matcher_cmd,
                 "--database_path",
                 str(db_path),
                 "--SiftMatching.use_gpu",
@@ -648,7 +658,16 @@ def handler(job):
 
         # 2) COLMAP (gpu -> cpu fallback)
         print("[job] running COLMAP…")
-        gs_source = run_colmap(work_dir)
+        pipeline = job_input.get("pipeline", {}) if isinstance(job_input.get("pipeline", {}), dict) else {}
+        colmap_cfg = pipeline.get("colmap", {}) if isinstance(pipeline.get("colmap", {}), dict) else {}
+        # Default: exhaustive for photo_burst/panorama, sequential for video.
+        capture_mode = str(job_input.get("capture_mode", "") or "").strip().lower()
+        matcher = str(colmap_cfg.get("matcher", "") or COLMAP_MATCHER_DEFAULT or "").strip().lower()
+        if not matcher:
+            matcher = "sequential" if capture_mode == "video" else "exhaustive"
+        max_img = colmap_cfg.get("max_image_size", None)
+        max_img_int = int(max_img) if isinstance(max_img, (int, float, str)) and str(max_img).strip().isdigit() else None
+        gs_source = run_colmap(work_dir, matcher=matcher, max_image_size=max_img_int)
 
         # 3) Train
         print("[job] running Gaussian Splatting…")
