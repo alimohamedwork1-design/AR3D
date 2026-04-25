@@ -81,6 +81,104 @@ def _is_sigabrt(err: BaseException) -> bool:
     return err.returncode in (-6, 134)
 
 
+def _boolish(v: object) -> bool:
+    s = str(v or "").strip().lower()
+    return s in {"1", "true", "yes", "y", "on"}
+
+
+def _want_mesh_export(job_input: dict) -> bool:
+    # Explicit input list wins; otherwise env default.
+    of = job_input.get("output_formats")
+    if isinstance(of, list):
+        vals = {str(x).strip().lower() for x in of}
+        return bool(vals & {"mesh", "mesh_glb", "glb_mesh", "glb-mesh"})
+    return _boolish(os.environ.get("EXPORT_MESH_DEFAULT", "0"))
+
+
+def try_export_mesh_glb_from_ply(ply_path: Path, glb_path: Path) -> bool:
+    """
+    Best-effort surface reconstruction for users who want a real mesh (triangles),
+    not a POINTS point-cloud GLB. Uses Open3D (if available).
+    """
+    try:
+        import open3d as o3d  # type: ignore
+    except Exception as e:
+        print(f"[mesh] open3d not available: {e}", flush=True)
+        return False
+
+    try:
+        import trimesh  # type: ignore
+    except Exception as e:
+        print(f"[mesh] trimesh not available: {e}", flush=True)
+        return False
+
+    try:
+        pcd = o3d.io.read_point_cloud(str(ply_path))
+        if pcd.is_empty():
+            print("[mesh] empty point cloud; skipping", flush=True)
+            return False
+
+        # Downsample to keep Poisson reasonable (can be heavy).
+        target_pts = int(os.environ.get("MESH_MAX_POINTS", "200000") or 200000)
+        if target_pts > 0 and len(pcd.points) > target_pts:
+            # Voxel size from bounding box diagonal.
+            bbox = pcd.get_axis_aligned_bounding_box()
+            diag = float((bbox.get_max_bound() - bbox.get_min_bound()).max())
+            voxel = max(0.002, min(0.05, diag / 250.0))
+            pcd = pcd.voxel_down_sample(voxel_size=voxel)
+            print(f"[mesh] voxel_down_sample voxel={voxel:.4f} points={len(pcd.points)}", flush=True)
+
+        # Estimate normals for reconstruction.
+        radius = float(os.environ.get("MESH_NORMAL_RADIUS", "0.06") or 0.06)
+        pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=radius, max_nn=30))
+        pcd.normalize_normals()
+
+        # Poisson reconstruction.
+        depth = int(os.environ.get("MESH_POISSON_DEPTH", "9") or 9)
+        print(f"[mesh] poisson depth={depth} points={len(pcd.points)}", flush=True)
+        mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=depth)
+
+        # Crop to original bounding box (helps remove floating junk).
+        bbox = pcd.get_axis_aligned_bounding_box()
+        mesh = mesh.crop(bbox)
+        mesh.remove_degenerate_triangles()
+        mesh.remove_duplicated_triangles()
+        mesh.remove_duplicated_vertices()
+        mesh.remove_non_manifold_edges()
+
+        # Density-based cleanup: drop lowest density vertices.
+        if densities is not None:
+            import numpy as np  # type: ignore
+
+            dens = np.asarray(densities)
+            if dens.size:
+                q = float(os.environ.get("MESH_DENSITY_QUANTILE", "0.02") or 0.02)
+                thr = float(np.quantile(dens, q))
+                mask = dens < thr
+                mesh.remove_vertices_by_mask(mask)
+                print(f"[mesh] density cleanup q={q} thr={thr:.6f}", flush=True)
+
+        # Optional simplification
+        target_tris = int(os.environ.get("MESH_TARGET_TRIANGLES", "250000") or 250000)
+        if target_tris > 0 and len(mesh.triangles) > target_tris:
+            mesh = mesh.simplify_quadric_decimation(target_tris)
+            print(f"[mesh] simplified triangles={len(mesh.triangles)}", flush=True)
+
+        v = mesh.vertices
+        f = mesh.triangles
+        if len(v) < 100 or len(f) < 200:
+            print(f"[mesh] too small after cleanup v={len(v)} f={len(f)}; skipping", flush=True)
+            return False
+
+        tm = trimesh.Trimesh(vertices=list(v), faces=list(f), process=False)
+        tm.export(str(glb_path))
+        ok = glb_path.is_file() and glb_path.stat().st_size > 1024
+        print(f"[mesh] wrote glb ok={ok} size={glb_path.stat().st_size if glb_path.exists() else 0}", flush=True)
+        return ok
+    except Exception as e:
+        print(f"[mesh] export failed: {e}", flush=True)
+        return False
+
 def ensure_colmap_sparse_zero_layout(dataset_root: Path) -> None:
     """
     GraphDeco gaussian-splatting expects COLMAP files under sparse/0/
@@ -631,7 +729,11 @@ def handler(job):
     supabase_bucket = str(job_input.get("supabase_bucket", "") or "").strip()
     supabase_image_paths = job_input.get("supabase_image_paths", None)
     tour_id = str(job_input.get("tour_id", "unknown")).strip()
+    quality_profile = str(job_input.get("quality_profile", "") or "").strip().lower()
     iterations = int(job_input.get("iterations", 15000) or 15000)
+    # Auto-max quality mode: bump defaults unless explicitly set.
+    if quality_profile in {"auto_max", "auto-max", "max"} and ("iterations" not in job_input):
+        iterations = int(os.environ.get("GS_ITERATIONS_DEFAULT", "20000") or 20000)
 
     has_supabase_paths = isinstance(supabase_image_paths, list) and len(supabase_image_paths) > 0 and bool(supabase_bucket)
     if not image_urls and not has_supabase_paths:
@@ -665,8 +767,14 @@ def handler(job):
         matcher = str(colmap_cfg.get("matcher", "") or COLMAP_MATCHER_DEFAULT or "").strip().lower()
         if not matcher:
             matcher = "sequential" if capture_mode == "video" else "exhaustive"
+        # Auto-max quality: always exhaustive unless it's a video capture.
+        if quality_profile in {"auto_max", "auto-max", "max"} and capture_mode != "video":
+            matcher = "exhaustive"
         max_img = colmap_cfg.get("max_image_size", None)
         max_img_int = int(max_img) if isinstance(max_img, (int, float, str)) and str(max_img).strip().isdigit() else None
+        # Auto-max quality: raise image size unless explicitly provided.
+        if quality_profile in {"auto_max", "auto-max", "max"} and max_img_int is None:
+            max_img_int = int(os.environ.get("COLMAP_MAX_IMAGE_SIZE", "3200") or 3200)
         gs_source = run_colmap(work_dir, matcher=matcher, max_image_size=max_img_int)
 
         # 3) Train
@@ -691,7 +799,7 @@ def handler(job):
 
         # Optional size reduction to satisfy Storage max object size (413 Payload too large).
         # Set via env or input; default keeps a reasonable cap.
-        max_points = int(job_input.get("max_points", os.environ.get("PLY_MAX_POINTS", "350000")) or 350000)
+        max_points = int(job_input.get("max_points", os.environ.get("PLY_MAX_POINTS", "800000")) or 800000)
         try:
             kept = downsample_and_rewrite_ply_inplace(ply, max_points)
             print(f"[ply] points={kept} max_points={max_points} size={ply.stat().st_size} bytes")
@@ -707,10 +815,20 @@ def handler(job):
         if not glb.is_file() or glb.stat().st_size < 64:
             return {"ok": False, "error": "glb_write_failed_empty"}
 
+        # 5b) Optional: create a real triangle mesh GLB for better “complete” visuals.
+        mesh_glb = out_dir / "mesh.glb"
+        mesh_ok = False
+        if quality_profile in {"auto_max", "auto-max", "max"}:
+            # Auto-max: generate mesh whenever possible.
+            mesh_ok = try_export_mesh_glb_from_ply(ply, mesh_glb)
+        elif _want_mesh_export(job_input):
+            mesh_ok = try_export_mesh_glb_from_ply(ply, mesh_glb)
+
         # 6) Upload outputs
         bucket = os.environ.get("SUPABASE_SPLATS_BUCKET", "splats").strip() or "splats"
         ply_remote = f"{bucket}/{tour_id}/point_cloud.ply"
         glb_remote = f"{bucket}/{tour_id}/point_cloud.glb"
+        mesh_remote = f"{bucket}/{tour_id}/mesh.glb"
         # Upload GLB first: viewer mainly depends on GLB; PLY can be skipped if too large.
         glb_url = upload_to_supabase(glb, glb_remote)
         print(f"[glb] uploaded glb_url={glb_url}", flush=True)
@@ -733,6 +851,15 @@ def handler(job):
             else:
                 raise
 
+        mesh_url = None
+        if mesh_ok and mesh_glb.exists():
+            try:
+                mesh_url = upload_to_supabase(mesh_glb, mesh_remote)
+                print(f"[mesh] uploaded mesh_url={mesh_url}", flush=True)
+            except Exception as e:
+                print(f"[mesh] upload failed: {e}", flush=True)
+                mesh_url = None
+
         return {
             "ok": True,
             "tour_id": tour_id,
@@ -740,7 +867,9 @@ def handler(job):
             # Top-level URLs: apps/api extractModelUrl / extractAuxUrls read these on runpod.output
             "glb_url": glb_url,
             "ply_url": ply_url,
-            "output": {"ply_url": ply_url, "glb_url": glb_url},
+            # Mesh GLB (triangles). Pollers look for keys like mesh_asset_url / mesh_url / glb_url.
+            "mesh_asset_url": mesh_url,
+            "output": {"ply_url": ply_url, "glb_url": glb_url, "mesh_asset_url": mesh_url},
             "total_seconds": round(time.time() - t0, 2),
         }
     except Exception as e:
