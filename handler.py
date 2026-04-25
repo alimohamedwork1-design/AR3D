@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Iterable, Optional, Tuple
 
@@ -19,6 +20,8 @@ from pygltflib import (
     Scene,
 )
 import struct
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 
 def _supabase_credentials() -> tuple[str, str]:
@@ -122,12 +125,28 @@ def download_images(image_urls: Iterable[str], work_dir: Path) -> Tuple[Path, in
     images_dir = work_dir / "input" / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
 
+    session = requests.Session()
+    retries = Retry(
+        total=3,
+        connect=3,
+        read=3,
+        status=3,
+        backoff_factor=0.9,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET"}),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retries, pool_connections=16, pool_maxsize=16)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+
     downloaded = 0
     total_urls = len(image_urls) if hasattr(image_urls, "__len__") else None
     for i, url in enumerate(image_urls):
         try:
-            r = requests.get(url, timeout=60)
-            r.raise_for_status()
+            r = session.get(url, timeout=60)
+            if r.status_code < 200 or r.status_code >= 300:
+                raise RuntimeError(f"http_{r.status_code}")
             ext = url.split("?")[0].split(".")[-1].lower()
             if ext not in {"jpg", "jpeg", "png", "webp"}:
                 ext = "jpg"
@@ -264,6 +283,13 @@ def run_colmap(work_dir: Path) -> Path:
             # Fallback on SIGABRT / common GPU crashes.
             if _is_sigabrt(e) or "cuda" in (e.stderr or "").lower() or "out of memory" in (e.stderr or "").lower():
                 print("[colmap] retrying on CPU…")
+                # GPU crashes can corrupt the COLMAP DB; recreate it for CPU retry.
+                try:
+                    if db_path.exists():
+                        db_path.unlink()
+                        print("[colmap] deleted colmap.db before CPU retry")
+                except Exception as de:
+                    print(f"[colmap] could not delete colmap.db: {de}")
                 attempt(False)
                 print("[colmap] mapper done (cpu after gpu fail)")
             else:
@@ -484,6 +510,7 @@ def downsample_and_rewrite_ply_inplace(ply_path: Path, max_points: int) -> int:
 
 
 def handler(job):
+    t0 = time.time()
     job_input = job.get("input", {}) or {}
     image_urls = job_input.get("image_urls", []) or []
     tour_id = str(job_input.get("tour_id", "unknown")).strip()
@@ -560,10 +587,38 @@ def handler(job):
             "glb_url": glb_url,
             "ply_url": ply_url,
             "output": {"ply_url": ply_url, "glb_url": glb_url},
+            "total_seconds": round(time.time() - t0, 2),
         }
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        msg = str(e)
+        err_lower = msg.lower()
+        if "need_at_least_10_images" in err_lower or "downloaded_only_" in err_lower:
+            code = "INSUFFICIENT_IMAGES"
+            retryable = False
+        elif "colmap" in err_lower:
+            code = "COLMAP_FAILED"
+            retryable = False
+        elif "gaussian_splatting_failed" in err_lower:
+            code = "GAUSSIAN_FAILED"
+            retryable = False
+        elif "missing_supabase_env" in err_lower or "supabase_upload_failed" in err_lower:
+            code = "UPLOAD_FAILED"
+            retryable = True
+        elif "glb_convert_failed" in err_lower or "ply_" in err_lower:
+            code = "EXPORT_FAILED"
+            retryable = False
+        else:
+            code = "UNKNOWN"
+            retryable = False
+        return {
+            "ok": False,
+            "error": msg,
+            "error_code": code,
+            "retryable": retryable,
+            "total_seconds": round(time.time() - t0, 2),
+        }
     finally:
+        print(f"[job] total_seconds={time.time() - t0:.2f} tour_id={tour_id}", flush=True)
         if work_dir.exists():
             shutil.rmtree(work_dir, ignore_errors=True)
 
