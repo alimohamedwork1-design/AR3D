@@ -288,6 +288,7 @@ def run_gaussian_splatting(gs_source: Path, iterations: int = 500) -> Path:
     if not gs_path.exists():
         raise RuntimeError("gaussian-splatting not installed in image")
 
+    # Official GraphDeco train.py does: args.save_iterations.append(args.iterations) — final iter is always saved.
     print(f"[gs] training iterations={iterations} source={gs_source}")
     p = subprocess.run(
         [
@@ -344,10 +345,29 @@ def upload_to_supabase(local_path: Path, remote_path: str) -> str:
     return f"{supabase_url}/storage/v1/object/public/{remote_path.lstrip('/')}"
 
 
+def _vertex_rgb_u8(v, i: int) -> tuple[int, int, int]:
+    """Classic PLY rgb (uchar) or 3DGS SH DC → display RGB."""
+    names = v.data.dtype.names or ()
+    if all(k in names for k in ("red", "green", "blue")):
+        return int(v["red"][i]) & 255, int(v["green"][i]) & 255, int(v["blue"][i]) & 255
+    # GraphDeco 3DGS PLY: degree-0 SH (same convention as common viewers)
+    if all(k in names for k in ("f_dc_0", "f_dc_1", "f_dc_2")):
+        sh_c0 = 0.28209479177387814
+        r = float(v["f_dc_0"][i]) * sh_c0 + 0.5
+        g = float(v["f_dc_1"][i]) * sh_c0 + 0.5
+        b = float(v["f_dc_2"][i]) * sh_c0 + 0.5
+        return (
+            int(max(0.0, min(1.0, r)) * 255),
+            int(max(0.0, min(1.0, g)) * 255),
+            int(max(0.0, min(1.0, b)) * 255),
+        )
+    raise RuntimeError("ply_no_rgb: need red/green/blue or f_dc_0/1/2")
+
+
 def ply_point_cloud_to_glb(ply_path: Path, glb_path: Path) -> None:
     """
     Convert a point-cloud PLY to a minimal GLB using glTF POINTS primitive.
-    Supports vertex positions and optional RGB colors.
+    Supports classic uchar RGB or GraphDeco Gaussian Splatting (f_dc_0..2).
     """
     ply = PlyData.read(str(ply_path))
     if "vertex" not in ply:
@@ -360,7 +380,13 @@ def ply_point_cloud_to_glb(ply_path: Path, glb_path: Path) -> None:
     if n <= 0:
         raise RuntimeError("ply_empty")
 
-    has_color = all(k in v.data.dtype.names for k in ("red", "green", "blue"))
+    names = v.data.dtype.names or ()
+    has_classic_rgb = all(k in names for k in ("red", "green", "blue"))
+    has_gs_dc = all(k in names for k in ("f_dc_0", "f_dc_1", "f_dc_2"))
+    has_color = has_classic_rgb or has_gs_dc
+    if not has_color:
+        raise RuntimeError("ply_no_color_fields")
+
     # Pack binary buffer: positions (float32*3) then colors (uint8*4) if present.
     buf = bytearray()
     for i in range(n):
@@ -375,10 +401,8 @@ def ply_point_cloud_to_glb(ply_path: Path, glb_path: Path) -> None:
             buf += b"\x00"
         col_offset = len(buf)
         for i in range(n):
-            r = int(v["red"][i])
-            g = int(v["green"][i])
-            b = int(v["blue"][i])
-            buf += bytes((r & 255, g & 255, b & 255, 255))
+            r, g, b = _vertex_rgb_u8(v, i)
+            buf += bytes((r, g, b, 255))
 
     # Compute bounds
     minx = float(min(x))
@@ -463,7 +487,7 @@ def handler(job):
     job_input = job.get("input", {}) or {}
     image_urls = job_input.get("image_urls", []) or []
     tour_id = str(job_input.get("tour_id", "unknown")).strip()
-    iterations = int(job_input.get("iterations", 6000) or 6000)
+    iterations = int(job_input.get("iterations", 15000) or 15000)
 
     if not image_urls:
         return {"ok": False, "error": "no_image_urls"}
@@ -491,6 +515,17 @@ def handler(job):
         if not ply or not ply.exists():
             return {"ok": False, "error": "no_point_cloud"}
 
+        ply_size_mb = ply.stat().st_size / (1024 * 1024)
+        print(f"[ply] path={ply} size_mb={ply_size_mb:.3f}")
+        ply_min_mb = float((job_input.get("ply_min_mb") or os.environ.get("PLY_MIN_MB") or "0").strip() or 0)
+        if ply_min_mb > 0 and ply_size_mb < ply_min_mb:
+            return {
+                "ok": False,
+                "error": f"ply_too_small_mb={ply_size_mb:.3f}_min={ply_min_mb}",
+                "ply_path": str(ply),
+                "colmap_hint": "too_few_points_or_bad_registration",
+            }
+
         # Optional size reduction to satisfy Storage max object size (413 Payload too large).
         # Set via env or input; default keeps a reasonable cap.
         max_points = int(job_input.get("max_points", os.environ.get("PLY_MAX_POINTS", "500000")) or 500000)
@@ -500,27 +535,30 @@ def handler(job):
         except Exception as e:
             print(f"[ply] downsample skipped: {e}")
 
-        # 5) Convert to GLB (point cloud)
+        # 5) Convert to GLB (point cloud) — required for Arqary viewer / API extractors
         glb = out_dir / "point_cloud.glb"
         try:
             ply_point_cloud_to_glb(ply, glb)
         except Exception as e:
-            print(f"[glb] convert failed: {e}")
-            glb = None
+            return {"ok": False, "error": f"glb_convert_failed: {e}"}
+        if not glb.is_file() or glb.stat().st_size < 64:
+            return {"ok": False, "error": "glb_write_failed_empty"}
 
         # 6) Upload outputs
         bucket = os.environ.get("SUPABASE_SPLATS_BUCKET", "splats").strip() or "splats"
         ply_remote = f"{bucket}/{tour_id}/point_cloud.ply"
+        glb_remote = f"{bucket}/{tour_id}/point_cloud.glb"
         ply_url = upload_to_supabase(ply, ply_remote)
-        glb_url = None
-        if glb and isinstance(glb, Path) and glb.exists():
-            glb_remote = f"{bucket}/{tour_id}/point_cloud.glb"
-            glb_url = upload_to_supabase(glb, glb_remote)
+        glb_url = upload_to_supabase(glb, glb_remote)
+        print(f"[glb] uploaded glb_url={glb_url}", flush=True)
 
         return {
             "ok": True,
             "tour_id": tour_id,
             "images_processed": downloaded,
+            # Top-level URLs: apps/api extractModelUrl / extractAuxUrls read these on runpod.output
+            "glb_url": glb_url,
+            "ply_url": ply_url,
             "output": {"ply_url": ply_url, "glb_url": glb_url},
         }
     except Exception as e:
