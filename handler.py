@@ -436,6 +436,46 @@ def upload_to_supabase(local_path: Path, remote_path: str) -> str:
     return f"{supabase_url}/storage/v1/object/public/{remote_path.lstrip('/')}"
 
 
+def _is_payload_too_large(err: BaseException) -> bool:
+    msg = str(err)
+    return "413" in msg and ("payload too large" in msg.lower() or "maximum allowed size" in msg.lower())
+
+
+def _target_max_upload_bytes() -> int:
+    """
+    Supabase Storage object size limits vary by plan.
+    Use a conservative cap to avoid repeated 413 errors.
+    Override with SUPABASE_MAX_UPLOAD_MB on the worker if needed.
+    """
+    raw = str(os.environ.get("SUPABASE_MAX_UPLOAD_MB", "45")).strip()
+    try:
+        mb = float(raw)
+    except Exception:
+        mb = 45.0
+    mb = max(5.0, min(200.0, mb))
+    return int(mb * 1024 * 1024)
+
+
+def downsample_until_under_limit(ply_path: Path, *, start_max_points: int, max_bytes: int) -> int:
+    """
+    Iteratively downsample PLY until it fits under `max_bytes` (best-effort).
+    Returns resulting point count.
+    """
+    max_points = int(start_max_points)
+    if max_points <= 0:
+        return 0
+    last_kept = 0
+    for _ in range(6):
+        kept = downsample_and_rewrite_ply_inplace(ply_path, max_points)
+        last_kept = kept
+        sz = ply_path.stat().st_size
+        print(f"[ply] after downsample: points={kept} size={sz} bytes max_bytes={max_bytes}", flush=True)
+        if sz <= max_bytes:
+            return kept
+        # Reduce aggressively for next round
+        max_points = max(20000, int(max_points * 0.6))
+    return last_kept
+
 def _vertex_rgb_u8(v, i: int) -> tuple[int, int, int]:
     """Classic PLY rgb (uchar) or 3DGS SH DC → display RGB."""
     names = v.data.dtype.names or ()
@@ -632,7 +672,7 @@ def handler(job):
 
         # Optional size reduction to satisfy Storage max object size (413 Payload too large).
         # Set via env or input; default keeps a reasonable cap.
-        max_points = int(job_input.get("max_points", os.environ.get("PLY_MAX_POINTS", "500000")) or 500000)
+        max_points = int(job_input.get("max_points", os.environ.get("PLY_MAX_POINTS", "350000")) or 350000)
         try:
             kept = downsample_and_rewrite_ply_inplace(ply, max_points)
             print(f"[ply] points={kept} max_points={max_points} size={ply.stat().st_size} bytes")
@@ -652,9 +692,27 @@ def handler(job):
         bucket = os.environ.get("SUPABASE_SPLATS_BUCKET", "splats").strip() or "splats"
         ply_remote = f"{bucket}/{tour_id}/point_cloud.ply"
         glb_remote = f"{bucket}/{tour_id}/point_cloud.glb"
-        ply_url = upload_to_supabase(ply, ply_remote)
+        # Upload GLB first: viewer mainly depends on GLB; PLY can be skipped if too large.
         glb_url = upload_to_supabase(glb, glb_remote)
         print(f"[glb] uploaded glb_url={glb_url}", flush=True)
+
+        ply_url = None
+        max_bytes = _target_max_upload_bytes()
+        # Ensure PLY is under the limit before upload (best-effort).
+        try:
+            if ply.stat().st_size > max_bytes:
+                downsample_until_under_limit(ply, start_max_points=max_points, max_bytes=max_bytes)
+        except Exception as e:
+            print(f"[ply] pre-upload size check/downsample failed: {e}", flush=True)
+
+        try:
+            ply_url = upload_to_supabase(ply, ply_remote)
+        except Exception as e:
+            if _is_payload_too_large(e):
+                print(f"[ply] upload too large; skipping ply upload err={e}", flush=True)
+                ply_url = None
+            else:
+                raise
 
         return {
             "ok": True,
