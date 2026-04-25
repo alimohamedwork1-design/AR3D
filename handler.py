@@ -22,6 +22,7 @@ from pygltflib import (
 import struct
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from urllib.parse import quote
 
 
 def _supabase_credentials() -> tuple[str, str]:
@@ -157,6 +158,70 @@ def download_images(image_urls: Iterable[str], work_dir: Path) -> Tuple[Path, in
             print(f"[download] failed url={url} err={e}")
 
     print(f"[download] downloaded {downloaded} / {total_urls if total_urls is not None else 'n/a'}")
+    return images_dir, downloaded
+
+
+def download_supabase_objects(
+    *,
+    bucket: str,
+    object_paths: Iterable[str],
+    work_dir: Path,
+) -> Tuple[Path, int]:
+    """
+    Download images from Supabase Storage using service role.
+    `object_paths` are paths within the bucket (e.g. "<uid>/<tourId>/scan_....jpg").
+    Requires SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY to be set on the worker.
+    """
+    supabase_url, service_role_key = _supabase_credentials()
+    missing = [n for n, v in [("SUPABASE_URL", supabase_url), ("SUPABASE_SERVICE_ROLE_KEY", service_role_key)] if not v]
+    if missing:
+        raise RuntimeError("missing_supabase_env: " + ", ".join(missing))
+
+    images_dir = work_dir / "input" / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+
+    session = requests.Session()
+    retries = Retry(
+        total=3,
+        connect=3,
+        read=3,
+        status=3,
+        backoff_factor=0.9,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET"}),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retries, pool_connections=16, pool_maxsize=16)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+
+    object_paths_list = [str(x) for x in object_paths]
+    downloaded = 0
+    for i, obj_path in enumerate(object_paths_list):
+        p = str(obj_path).lstrip("/")
+        try:
+            enc_path = quote(p, safe="/")
+            url = f"{supabase_url.rstrip('/')}/storage/v1/object/{bucket}/{enc_path}"
+            r = session.get(
+                url,
+                headers={
+                    "Authorization": f"Bearer {service_role_key}",
+                    "apikey": service_role_key,
+                },
+                timeout=60,
+            )
+            if r.status_code < 200 or r.status_code >= 300:
+                raise RuntimeError(f"http_{r.status_code}")
+            ext = p.split("?")[0].split(".")[-1].lower()
+            if ext not in {"jpg", "jpeg", "png", "webp"}:
+                ext = "jpg"
+            filepath = images_dir / f"img_{i:04d}.{ext}"
+            filepath.write_bytes(r.content)
+            downloaded += 1
+        except Exception as e:
+            print(f"[download_supabase] failed path={p} err={e}", flush=True)
+
+    print(f"[download_supabase] downloaded {downloaded} / {len(object_paths_list)}", flush=True)
     return images_dir, downloaded
 
 
@@ -513,19 +578,31 @@ def handler(job):
     t0 = time.time()
     job_input = job.get("input", {}) or {}
     image_urls = job_input.get("image_urls", []) or []
+    supabase_bucket = str(job_input.get("supabase_bucket", "") or "").strip()
+    supabase_image_paths = job_input.get("supabase_image_paths", None)
     tour_id = str(job_input.get("tour_id", "unknown")).strip()
     iterations = int(job_input.get("iterations", 15000) or 15000)
 
-    if not image_urls:
-        return {"ok": False, "error": "no_image_urls"}
-    if len(image_urls) < 10:
-        return {"ok": False, "error": f"need_at_least_10_images_got_{len(image_urls)}"}
+    has_supabase_paths = isinstance(supabase_image_paths, list) and len(supabase_image_paths) > 0 and bool(supabase_bucket)
+    if not image_urls and not has_supabase_paths:
+        return {"ok": False, "error": "no_image_urls_or_supabase_paths", "error_code": "INSUFFICIENT_IMAGES", "retryable": False}
+    if image_urls and len(image_urls) < 10:
+        return {"ok": False, "error": f"need_at_least_10_images_got_{len(image_urls)}", "error_code": "INSUFFICIENT_IMAGES", "retryable": False}
+    if has_supabase_paths and len(supabase_image_paths) < 10:
+        return {"ok": False, "error": f"need_at_least_10_images_got_{len(supabase_image_paths)}", "error_code": "INSUFFICIENT_IMAGES", "retryable": False}
 
     work_dir = Path(f"/workspace/job_{tour_id}")
 
     try:
         # 1) Download
-        images_dir, downloaded = download_images(image_urls, work_dir)
+        if has_supabase_paths:
+            images_dir, downloaded = download_supabase_objects(
+                bucket=supabase_bucket,
+                object_paths=supabase_image_paths,
+                work_dir=work_dir,
+            )
+        else:
+            images_dir, downloaded = download_images(image_urls, work_dir)
         if downloaded < 10:
             return {"ok": False, "error": f"downloaded_only_{downloaded}"}
 
