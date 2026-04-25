@@ -35,6 +35,10 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 RUN pip install --no-cache-dir opencv-python joblib && \
   pip install --no-cache-dir --force-reinstall "numpy==1.26.4"
 
+# Optional mesh export (Poisson reconstruction) for "complete" GLB meshes.
+# Heavy dependency; kept last so cache churn is limited.
+RUN pip install --no-cache-dir open3d trimesh
+
 # Build CUDA extensions (separate layers so build logs are clear)
 RUN pip install --no-cache-dir -v --no-build-isolation /workspace/gaussian-splatting/submodules/diff-gaussian-rasterization
 RUN pip install --no-cache-dir -v --no-build-isolation /workspace/gaussian-splatting/submodules/simple-knn
