@@ -25,6 +25,7 @@ from urllib3.util.retry import Retry
 from urllib.parse import quote
 
 
+
 def _supabase_credentials() -> tuple[str, str]:
     """
     Read at call time (not only import) so RunPod-injected env is visible.
