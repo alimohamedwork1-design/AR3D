@@ -42,12 +42,18 @@ RUN pip install --no-cache-dir opencv-python joblib && \
 # Heavy dependency; kept last so cache churn is limited.
 # NOTE: open3d wheels are not available on all architectures (e.g., linux/arm64). Don't fail the image build.
 ARG TARGETARCH
-RUN python -m pip install --no-cache-dir --upgrade pip && \
-  if [ "$TARGETARCH" = "amd64" ]; then \
-    pip install --no-cache-dir --only-binary=:all: "open3d==0.18.0" "trimesh>=4.4.0" ; \
+RUN set -eux; \
+  echo "TARGETARCH=${TARGETARCH:-unknown}"; \
+  python -V; \
+  python -m pip --version; \
+  if [ "${TARGETARCH:-}" = "amd64" ]; then \
+    python -m pip install --no-cache-dir --only-binary=:all: "open3d==0.18.0" "trimesh>=4.4.0" || ( \
+      echo "WARN: open3d install failed; continuing without mesh export"; \
+      python -m pip install --no-cache-dir "trimesh>=4.4.0" \
+    ); \
   else \
-    echo "WARN: skipping open3d install on TARGETARCH=$TARGETARCH" ; \
-    pip install --no-cache-dir "trimesh>=4.4.0" ; \
+    echo "WARN: skipping open3d install on TARGETARCH=${TARGETARCH:-unknown}"; \
+    python -m pip install --no-cache-dir "trimesh>=4.4.0"; \
   fi
 
 # Build CUDA extensions (separate layers so build logs are clear)
