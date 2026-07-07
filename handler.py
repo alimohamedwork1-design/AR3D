@@ -722,10 +722,96 @@ def downsample_and_rewrite_ply_inplace(ply_path: Path, max_points: int) -> int:
     return len(sampled)
 
 
+def prepare_dataset_from_url(dataset_url: str, dataset_subset: str, work_dir: Path) -> Tuple[Path, int]:
+    """
+    Download a dataset zip and extract one subset's images directly on the worker,
+    so nothing is uploaded from the client machine. Images are copied into
+    <work_dir>/input/images (exactly where run_colmap expects them).
+    """
+    import zipfile
+    import urllib.request
+
+    images_dir = work_dir / "input" / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+
+    zip_path = work_dir / "dataset.zip"
+    extract_path = work_dir / "extracted"
+    extract_path.mkdir(parents=True, exist_ok=True)
+
+    print(f"[dataset] downloading {dataset_url}", flush=True)
+    urllib.request.urlretrieve(dataset_url, str(zip_path))
+
+    subset = (dataset_subset or "").strip().strip("/")
+    print(f"[dataset] extracting subset={subset or '(all)'}", flush=True)
+    with zipfile.ZipFile(str(zip_path), "r") as z:
+        names = z.namelist()
+        if subset:
+            members = [m for m in names if m.startswith(subset + "/") or ("/" + subset + "/") in m]
+            if not members:
+                members = [m for m in names if subset.lower() in m.lower()]
+        else:
+            members = names
+        z.extractall(str(extract_path), members or names)
+
+    exts = {".jpg", ".jpeg", ".png", ".webp"}
+
+    def count_imgs(d: Path) -> int:
+        try:
+            return len([f for f in d.iterdir() if f.is_file() and f.suffix.lower() in exts])
+        except Exception:
+            return 0
+
+    # Prefer a directory literally named "images" belonging to the subset.
+    candidates = [
+        d for d in extract_path.rglob("*")
+        if d.is_dir() and d.name.lower() == "images" and (not subset or subset.lower() in str(d).lower())
+    ]
+    src_dir = None
+    if candidates:
+        src_dir = max(candidates, key=count_imgs)
+    else:
+        # Fallback: any directory (subset-scoped) that directly holds images.
+        best = None
+        best_n = 0
+        for d in extract_path.rglob("*"):
+            if not d.is_dir():
+                continue
+            if subset and subset.lower() not in str(d).lower():
+                continue
+            n = count_imgs(d)
+            if n > best_n:
+                best_n = n
+                best = d
+        src_dir = best
+
+    if src_dir is None:
+        raise RuntimeError(f"dataset_extract_failed: no image directory found for subset={subset}")
+
+    image_files = sorted([f for f in src_dir.iterdir() if f.is_file() and f.suffix.lower() in exts])
+    if len(image_files) < 10:
+        raise RuntimeError(f"dataset_extract_failed: found only {len(image_files)} images in {src_dir}")
+
+    print(f"[dataset] found {len(image_files)} images in {src_dir}", flush=True)
+    for i, img in enumerate(image_files):
+        shutil.copy(str(img), str(images_dir / f"img_{i:04d}{img.suffix.lower()}"))
+
+    # Free disk: the zip + raw extraction can be large.
+    try:
+        zip_path.unlink(missing_ok=True)
+        shutil.rmtree(extract_path, ignore_errors=True)
+    except Exception:
+        pass
+
+    print(f"[dataset] prepared {len(image_files)} images at {images_dir}", flush=True)
+    return images_dir, len(image_files)
+
+
 def handler(job):
     t0 = time.time()
     job_input = job.get("input", {}) or {}
     image_urls = job_input.get("image_urls", []) or []
+    dataset_url = str(job_input.get("dataset_url", "") or "").strip()
+    dataset_subset = str(job_input.get("dataset_subset", "truck") or "truck").strip()
     supabase_bucket = str(job_input.get("supabase_bucket", "") or "").strip()
     supabase_image_paths = job_input.get("supabase_image_paths", None)
     tour_id = str(job_input.get("tour_id", "unknown")).strip()
@@ -736,7 +822,7 @@ def handler(job):
         iterations = int(os.environ.get("GS_ITERATIONS_DEFAULT", "20000") or 20000)
 
     has_supabase_paths = isinstance(supabase_image_paths, list) and len(supabase_image_paths) > 0 and bool(supabase_bucket)
-    if not image_urls and not has_supabase_paths:
+    if not dataset_url and not image_urls and not has_supabase_paths:
         return {"ok": False, "error": "no_image_urls_or_supabase_paths", "error_code": "INSUFFICIENT_IMAGES", "retryable": False}
     if image_urls and len(image_urls) < 10:
         return {"ok": False, "error": f"need_at_least_10_images_got_{len(image_urls)}", "error_code": "INSUFFICIENT_IMAGES", "retryable": False}
@@ -747,7 +833,10 @@ def handler(job):
 
     try:
         # 1) Download
-        if has_supabase_paths:
+        if dataset_url:
+            # Download + extract the test dataset directly on the worker (no client upload).
+            images_dir, downloaded = prepare_dataset_from_url(dataset_url, dataset_subset, work_dir)
+        elif has_supabase_paths:
             images_dir, downloaded = download_supabase_objects(
                 bucket=supabase_bucket,
                 object_paths=supabase_image_paths,
@@ -875,7 +964,7 @@ def handler(job):
     except Exception as e:
         msg = str(e)
         err_lower = msg.lower()
-        if "need_at_least_10_images" in err_lower or "downloaded_only_" in err_lower:
+        if "need_at_least_10_images" in err_lower or "downloaded_only_" in err_lower or "dataset_extract_failed" in err_lower or "dataset" in err_lower:
             code = "INSUFFICIENT_IMAGES"
             retryable = False
         elif "colmap" in err_lower:
