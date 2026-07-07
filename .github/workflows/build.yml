@@ -26,4 +26,6 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
-          tags: ghcr.io/alimohamedwork1-design/ar3d:latest
+          tags: |
+            ghcr.io/alimohamedwork1-design/ar3d:latest
+            ghcr.io/alimohamedwork1-design/ar3d:${{ github.sha }}

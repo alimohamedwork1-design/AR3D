@@ -556,12 +556,12 @@ def _target_max_upload_bytes() -> int:
     Use a conservative cap to avoid repeated 413 errors.
     Override with SUPABASE_MAX_UPLOAD_MB on the worker if needed.
     """
-    raw = str(os.environ.get("SUPABASE_MAX_UPLOAD_MB", "45")).strip()
+    raw = str(os.environ.get("SUPABASE_MAX_UPLOAD_MB", "200")).strip()
     try:
         mb = float(raw)
     except Exception:
-        mb = 45.0
-    mb = max(5.0, min(200.0, mb))
+        mb = 200.0
+    mb = max(5.0, min(500.0, mb))
     return int(mb * 1024 * 1024)
 
 
@@ -722,6 +722,90 @@ def downsample_and_rewrite_ply_inplace(ply_path: Path, max_points: int) -> int:
     return len(sampled)
 
 
+def write_gaussian_splat(
+    ply_path: Path,
+    splat_path: Path,
+    *,
+    alpha_min: float = 0.06,
+    scale_pct: float = 99.5,
+) -> int:
+    """
+    Convert a GraphDeco 3DGS point_cloud.ply into the compact antimatter15 `.splat`
+    format (32 bytes/gaussian) so web renderers like @mkkellogg/gaussian-splats-3d
+    can display it as real Gaussians (not a bare point cloud).
+
+    Layout per gaussian: position f32*3, scale f32*3, color RGBA u8*4, rotation u8*4.
+    Prunes low-opacity and oversized (floater) gaussians. Returns gaussian count.
+    """
+    import numpy as np
+
+    ply = PlyData.read(str(ply_path))
+    if "vertex" not in ply:
+        raise RuntimeError("ply_missing_vertex")
+    v = ply["vertex"].data
+    names = v.dtype.names or ()
+    required = (
+        "x", "y", "z",
+        "scale_0", "scale_1", "scale_2",
+        "rot_0", "rot_1", "rot_2", "rot_3",
+        "opacity", "f_dc_0", "f_dc_1", "f_dc_2",
+    )
+    missing = [k for k in required if k not in names]
+    if missing:
+        raise RuntimeError(f"splat_needs_3dgs_fields_missing={missing}")
+
+    xyz = np.stack([v["x"], v["y"], v["z"]], axis=1).astype(np.float32)
+    scales = np.exp(
+        np.stack([v["scale_0"], v["scale_1"], v["scale_2"]], axis=1).astype(np.float32)
+    )
+    quat = np.stack([v["rot_0"], v["rot_1"], v["rot_2"], v["rot_3"]], axis=1).astype(np.float32)
+    qnorm = np.linalg.norm(quat, axis=1, keepdims=True)
+    qnorm[qnorm == 0] = 1.0
+    quat = quat / qnorm
+    opacity = 1.0 / (1.0 + np.exp(-v["opacity"].astype(np.float32)))
+    sh_c0 = 0.28209479177387814
+    rgb = 0.5 + sh_c0 * np.stack(
+        [v["f_dc_0"], v["f_dc_1"], v["f_dc_2"]], axis=1
+    ).astype(np.float32)
+    rgb = np.clip(rgb, 0.0, 1.0)
+
+    n = xyz.shape[0]
+    # Prune floaters: drop near-transparent and abnormally large gaussians.
+    keep = opacity >= alpha_min
+    if scale_pct < 100.0 and n > 0:
+        max_scale = scales.max(axis=1)
+        thr = float(np.percentile(max_scale, scale_pct))
+        keep = keep & (max_scale <= thr)
+    if int(keep.sum()) < 10:
+        keep = np.ones(n, dtype=bool)  # never prune everything away
+    xyz, scales, quat, opacity, rgb = xyz[keep], scales[keep], quat[keep], opacity[keep], rgb[keep]
+
+    # Sort by importance (opacity * volume) desc for progressive/priority loading.
+    importance = opacity * np.prod(scales, axis=1)
+    order = np.argsort(-importance)
+    xyz, scales, quat, opacity, rgb = (
+        np.ascontiguousarray(xyz[order]),
+        np.ascontiguousarray(scales[order]),
+        np.ascontiguousarray(quat[order]),
+        opacity[order],
+        rgb[order],
+    )
+
+    m = xyz.shape[0]
+    out = np.zeros((m, 32), dtype=np.uint8)
+    out[:, 0:12] = xyz.view(np.uint8).reshape(m, 12)
+    out[:, 12:24] = scales.view(np.uint8).reshape(m, 12)
+    rgba = np.empty((m, 4), dtype=np.uint8)
+    rgba[:, 0:3] = (rgb * 255.0).clip(0, 255).astype(np.uint8)
+    rgba[:, 3] = (opacity * 255.0).clip(0, 255).astype(np.uint8)
+    out[:, 24:28] = rgba
+    out[:, 28:32] = (quat * 128.0 + 128.0).clip(0, 255).astype(np.uint8)
+
+    splat_path.write_bytes(out.tobytes())
+    print(f"[splat] wrote {m} gaussians ({splat_path.stat().st_size} bytes) kept from {n}", flush=True)
+    return m
+
+
 def prepare_dataset_from_url(dataset_url: str, dataset_subset: str, work_dir: Path) -> Tuple[Path, int]:
     """
     Download a dataset zip and extract one subset's images directly on the worker,
@@ -819,7 +903,7 @@ def handler(job):
     iterations = int(job_input.get("iterations", 15000) or 15000)
     # Auto-max quality mode: bump defaults unless explicitly set.
     if quality_profile in {"auto_max", "auto-max", "max"} and ("iterations" not in job_input):
-        iterations = int(os.environ.get("GS_ITERATIONS_DEFAULT", "20000") or 20000)
+        iterations = int(os.environ.get("GS_ITERATIONS_DEFAULT", "30000") or 30000)
 
     has_supabase_paths = isinstance(supabase_image_paths, list) and len(supabase_image_paths) > 0 and bool(supabase_bucket)
     if not dataset_url and not image_urls and not has_supabase_paths:
@@ -895,7 +979,17 @@ def handler(job):
         except Exception as e:
             print(f"[ply] downsample skipped: {e}")
 
-        # 5) Convert to GLB (point cloud) — required for Arqary viewer / API extractors
+        # 5) Real Gaussian splat asset (.splat) — this is what makes the web viewer
+        # look photorealistic (Luma/Polycam style), unlike the point-cloud GLB.
+        splat = out_dir / "point_cloud.splat"
+        splat_ok = False
+        try:
+            write_gaussian_splat(ply, splat)
+            splat_ok = splat.is_file() and splat.stat().st_size > 64
+        except Exception as e:
+            print(f"[splat] export failed (continuing with GLB): {e}", flush=True)
+
+        # 5b) Convert to GLB (point cloud) — lightweight fallback / API extractors.
         glb = out_dir / "point_cloud.glb"
         try:
             ply_point_cloud_to_glb(ply, glb)
@@ -917,10 +1011,21 @@ def handler(job):
         bucket = os.environ.get("SUPABASE_SPLATS_BUCKET", "splats").strip() or "splats"
         ply_remote = f"{bucket}/{tour_id}/point_cloud.ply"
         glb_remote = f"{bucket}/{tour_id}/point_cloud.glb"
+        splat_remote = f"{bucket}/{tour_id}/point_cloud.splat"
         mesh_remote = f"{bucket}/{tour_id}/mesh.glb"
         # Upload GLB first: viewer mainly depends on GLB; PLY can be skipped if too large.
         glb_url = upload_to_supabase(glb, glb_remote)
         print(f"[glb] uploaded glb_url={glb_url}", flush=True)
+
+        # Upload the Gaussian splat asset (primary for photorealistic web rendering).
+        splat_url = None
+        if splat_ok:
+            try:
+                splat_url = upload_to_supabase(splat, splat_remote)
+                print(f"[splat] uploaded splat_url={splat_url}", flush=True)
+            except Exception as e:
+                print(f"[splat] upload failed: {e}", flush=True)
+                splat_url = None
 
         ply_url = None
         max_bytes = _target_max_upload_bytes()
@@ -956,9 +1061,16 @@ def handler(job):
             # Top-level URLs: apps/api extractModelUrl / extractAuxUrls read these on runpod.output
             "glb_url": glb_url,
             "ply_url": ply_url,
+            # Real Gaussian splat asset (.splat) — primary for photorealistic viewers.
+            "splat_url": splat_url,
             # Mesh GLB (triangles). Pollers look for keys like mesh_asset_url / mesh_url / glb_url.
             "mesh_asset_url": mesh_url,
-            "output": {"ply_url": ply_url, "glb_url": glb_url, "mesh_asset_url": mesh_url},
+            "output": {
+                "ply_url": ply_url,
+                "glb_url": glb_url,
+                "splat_url": splat_url,
+                "mesh_asset_url": mesh_url,
+            },
             "total_seconds": round(time.time() - t0, 2),
         }
     except Exception as e:
