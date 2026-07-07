@@ -7,7 +7,7 @@ from typing import Iterable, Optional, Tuple
 
 import requests
 import runpod
-from plyfile import PlyData
+from plyfile import PlyData, PlyElement
 from pygltflib import (
     Accessor,
     Asset,
@@ -711,15 +711,14 @@ def downsample_and_rewrite_ply_inplace(ply_path: Path, max_points: int) -> int:
     v = ply["vertex"].data
     n = len(v)
     if n <= max_points:
-        # Still rewrite as binary to reduce size if it was ascii.
-        PlyData(ply.elements, text=False).write(str(ply_path))
+        # Do not rewrite in-place: re-encoding can corrupt GraphDeco 3DGS PLY schemas.
         return n
 
-    # Deterministic-ish stride sampling (faster than random, no numpy needed)
+    # Deterministic stride sampling (faster than random, no numpy needed)
     step = max(1, n // max_points)
     sampled = v[::step][:max_points]
-    new_ply = PlyData([ply["vertex"].__class__(sampled, "vertex")], text=False)
-    new_ply.write(str(ply_path))
+    vertex_el = PlyElement.describe(sampled, "vertex")
+    PlyData([vertex_el], text=False).write(str(ply_path))
     return len(sampled)
 
 
