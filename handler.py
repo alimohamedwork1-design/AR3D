@@ -714,9 +714,13 @@ def downsample_and_rewrite_ply_inplace(ply_path: Path, max_points: int) -> int:
         # Do not rewrite in-place: re-encoding can corrupt GraphDeco 3DGS PLY schemas.
         return n
 
-    # Deterministic stride sampling (faster than random, no numpy needed)
+    # Deterministic stride sampling. Force a CONTIGUOUS copy: writing a strided
+    # view via plyfile can emit a header count that doesn't match the byte stream
+    # (-> "early end-of-file" when the file is read back).
+    import numpy as np
+
     step = max(1, n // max_points)
-    sampled = v[::step][:max_points]
+    sampled = np.ascontiguousarray(v[::step][:max_points])
     vertex_el = PlyElement.describe(sampled, "vertex")
     PlyData([vertex_el], text=False).write(str(ply_path))
     return len(sampled)
@@ -970,8 +974,20 @@ def handler(job):
                 "colmap_hint": "too_few_points_or_bad_registration",
             }
 
+        # 5) Real Gaussian splat asset (.splat) — this is what makes the web viewer
+        # look photorealistic (Luma/Polycam style), unlike the point-cloud GLB.
+        # IMPORTANT: build it from the PRISTINE PLY, before any downsample/rewrite,
+        # so a rewrite quirk can never corrupt the splat's source data.
+        splat = out_dir / "point_cloud.splat"
+        splat_ok = False
+        try:
+            write_gaussian_splat(ply, splat)
+            splat_ok = splat.is_file() and splat.stat().st_size > 64
+        except Exception as e:
+            print(f"[splat] export failed (will rely on GLB): {e}", flush=True)
+
         # Optional size reduction to satisfy Storage max object size (413 Payload too large).
-        # Set via env or input; default keeps a reasonable cap.
+        # Only needed for the PLY/GLB fallback path. Set via env or input.
         max_points = int(job_input.get("max_points", os.environ.get("PLY_MAX_POINTS", "800000")) or 800000)
         try:
             kept = downsample_and_rewrite_ply_inplace(ply, max_points)
@@ -979,24 +995,18 @@ def handler(job):
         except Exception as e:
             print(f"[ply] downsample skipped: {e}")
 
-        # 5) Real Gaussian splat asset (.splat) — this is what makes the web viewer
-        # look photorealistic (Luma/Polycam style), unlike the point-cloud GLB.
-        splat = out_dir / "point_cloud.splat"
-        splat_ok = False
-        try:
-            write_gaussian_splat(ply, splat)
-            splat_ok = splat.is_file() and splat.stat().st_size > 64
-        except Exception as e:
-            print(f"[splat] export failed (continuing with GLB): {e}", flush=True)
-
         # 5b) Convert to GLB (point cloud) — lightweight fallback / API extractors.
+        # Non-fatal when we already have a real splat: the splat is the primary asset.
         glb = out_dir / "point_cloud.glb"
+        glb_ok = False
         try:
             ply_point_cloud_to_glb(ply, glb)
+            glb_ok = glb.is_file() and glb.stat().st_size >= 64
         except Exception as e:
-            return {"ok": False, "error": f"glb_convert_failed: {e}"}
-        if not glb.is_file() or glb.stat().st_size < 64:
-            return {"ok": False, "error": "glb_write_failed_empty"}
+            print(f"[glb] convert failed: {e}", flush=True)
+            glb_ok = False
+        if not glb_ok and not splat_ok:
+            return {"ok": False, "error": f"export_failed_no_splat_no_glb"}
 
         # 5b) Optional: create a real triangle mesh GLB for better “complete” visuals.
         mesh_glb = out_dir / "mesh.glb"
@@ -1013,10 +1023,6 @@ def handler(job):
         glb_remote = f"{bucket}/{tour_id}/point_cloud.glb"
         splat_remote = f"{bucket}/{tour_id}/point_cloud.splat"
         mesh_remote = f"{bucket}/{tour_id}/mesh.glb"
-        # Upload GLB first: viewer mainly depends on GLB; PLY can be skipped if too large.
-        glb_url = upload_to_supabase(glb, glb_remote)
-        print(f"[glb] uploaded glb_url={glb_url}", flush=True)
-
         # Upload the Gaussian splat asset (primary for photorealistic web rendering).
         splat_url = None
         if splat_ok:
@@ -1026,6 +1032,16 @@ def handler(job):
             except Exception as e:
                 print(f"[splat] upload failed: {e}", flush=True)
                 splat_url = None
+
+        # Upload GLB (lightweight fallback / API extractors). May be absent.
+        glb_url = None
+        if glb_ok:
+            try:
+                glb_url = upload_to_supabase(glb, glb_remote)
+                print(f"[glb] uploaded glb_url={glb_url}", flush=True)
+            except Exception as e:
+                print(f"[glb] upload failed: {e}", flush=True)
+                glb_url = None
 
         ply_url = None
         max_bytes = _target_max_upload_bytes()
@@ -1053,6 +1069,9 @@ def handler(job):
             except Exception as e:
                 print(f"[mesh] upload failed: {e}", flush=True)
                 mesh_url = None
+
+        if not splat_url and not glb_url:
+            return {"ok": False, "error": "upload_failed_no_viewable_asset"}
 
         return {
             "ok": True,
