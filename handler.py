@@ -545,6 +545,89 @@ def upload_to_supabase(local_path: Path, remote_path: str) -> str:
     return f"{supabase_url}/storage/v1/object/public/{remote_path.lstrip('/')}"
 
 
+def create_property_model_row(
+    *,
+    property_id: str,
+    model_name: str,
+    splat_url: Optional[str],
+    glb_url: Optional[str],
+    ply_url: Optional[str],
+    mesh_url: Optional[str],
+    usdz_url: Optional[str] = None,
+    file_size: Optional[int] = None,
+    splat_count: Optional[int] = None,
+    owner_id: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Publish the finished capture into arqary.com's property_models table so the
+    SPA renders it through the surfaces it already has (/3d-tour, /viewer, AR).
+
+    The splat is the primary asset; GLB/PLY/mesh ride along in lod_urls as
+    fallbacks for clients that can't rasterise Gaussians. Returns the new row id,
+    or None when the insert can't be made (never fatal to the job).
+    """
+    supabase_url, service_role = _supabase_credentials()
+    if not supabase_url or not service_role or not property_id:
+        return None
+
+    primary = splat_url or glb_url or mesh_url
+    if not primary:
+        return None
+
+    payload: Dict[str, Any] = {
+        "property_id": property_id,
+        "model_name": model_name or "ARqary Scan",
+        "model_url": primary,
+        "format": "splat" if splat_url else "glb",
+        "model_type": "gaussian_splat" if splat_url else "model",
+        "source": "arqary_scanner",
+        "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "lod_urls": {k: v for k, v in {
+            "splat": splat_url,
+            "glb": glb_url,
+            "ply": ply_url,
+            "mesh": mesh_url,
+        }.items() if v},
+        "ar_enabled": bool(usdz_url),
+    }
+    if usdz_url:
+        payload["usdz_url"] = usdz_url
+    if file_size:
+        payload["file_size"] = int(file_size)
+    if splat_count:
+        payload["splat_count"] = int(splat_count)
+    if owner_id:
+        payload["created_by"] = owner_id
+
+    try:
+        resp = requests.post(
+            f"{supabase_url.rstrip('/')}/rest/v1/property_models",
+            headers={
+                "apikey": service_role,
+                "Authorization": f"Bearer {service_role}",
+                "Content-Type": "application/json",
+                "Prefer": "return=representation",
+            },
+            json=payload,
+            timeout=30,
+        )
+    except Exception as e:
+        print(f"[property_models] insert error: {type(e).__name__}: {e}", flush=True)
+        return None
+
+    if resp.status_code not in (200, 201):
+        print(f"[property_models] insert failed http={resp.status_code} body={resp.text[:300]}", flush=True)
+        return None
+
+    try:
+        rows = resp.json()
+        model_id = rows[0]["id"] if isinstance(rows, list) and rows else None
+    except Exception:
+        model_id = None
+    print(f"[property_models] created model_id={model_id}", flush=True)
+    return model_id
+
+
 def _is_payload_too_large(err: BaseException) -> bool:
     msg = str(err)
     return "413" in msg and ("payload too large" in msg.lower() or "maximum allowed size" in msg.lower())
@@ -908,6 +991,11 @@ def handler(job):
     supabase_bucket = str(job_input.get("supabase_bucket", "") or "").strip()
     supabase_image_paths = job_input.get("supabase_image_paths", None)
     tour_id = str(job_input.get("tour_id", "unknown")).strip()
+    # arqary.com linkage: the finished splat becomes a property_models row under
+    # this property, and scan_jobs is matched back through the session.
+    property_id = str(job_input.get("property_id", "") or "").strip()
+    session_id = str(job_input.get("session_id", "") or "").strip()
+    model_name = str(job_input.get("model_name", "") or "").strip()
     quality_profile = str(job_input.get("quality_profile", "") or "").strip().lower()
     iterations = int(job_input.get("iterations", 15000) or 15000)
     # Auto-max quality mode: bump defaults unless explicitly set.
@@ -987,7 +1075,9 @@ def handler(job):
         # IMPORTANT: build it from the PRISTINE PLY, before any downsample/rewrite,
         # so a rewrite quirk can never corrupt the splat's source data.
         # Cap gaussians so the 32-byte/gaussian file stays under the storage limit.
-        splat_max_mb = float((os.environ.get("SPLAT_MAX_MB") or "45").strip() or 45)
+        # The arqary.com 3d-models bucket allows 500MB, so the cap is about what a
+        # browser can sort per frame rather than what Storage will accept.
+        splat_max_mb = float((os.environ.get("SPLAT_MAX_MB") or "400").strip() or 400)
         splat_max_gaussians = max(10000, int((splat_max_mb * 1024 * 1024) / 32))
         splat = out_dir / "point_cloud.splat"
         splat_ok = False
@@ -1033,12 +1123,15 @@ def handler(job):
         elif _want_mesh_export(job_input):
             mesh_ok = try_export_mesh_glb_from_ply(ply, mesh_glb)
 
-        # 6) Upload outputs
-        bucket = os.environ.get("SUPABASE_SPLATS_BUCKET", "splats").strip() or "splats"
-        ply_remote = f"{bucket}/{tour_id}/point_cloud.ply"
-        glb_remote = f"{bucket}/{tour_id}/point_cloud.glb"
-        splat_remote = f"{bucket}/{tour_id}/point_cloud.splat"
-        mesh_remote = f"{bucket}/{tour_id}/mesh.glb"
+        # 6) Upload outputs.
+        # arqary.com keys the 3d-models bucket as {property_id}/{timestamp}/{file};
+        # fall back to tour_id when a capture isn't attached to a property yet.
+        bucket = os.environ.get("SUPABASE_SPLATS_BUCKET", "3d-models").strip() or "3d-models"
+        asset_prefix = f"{bucket}/{property_id or tour_id}/{int(time.time())}"
+        ply_remote = f"{asset_prefix}/point_cloud.ply"
+        glb_remote = f"{asset_prefix}/point_cloud.glb"
+        splat_remote = f"{asset_prefix}/point_cloud.splat"
+        mesh_remote = f"{asset_prefix}/mesh.glb"
         # Upload the Gaussian splat asset (primary for photorealistic web rendering).
         splat_url = None
         if splat_ok:
@@ -1091,9 +1184,28 @@ def handler(job):
         if not splat_url and not glb_url:
             return {"ok": False, "error": "upload_failed_no_viewable_asset", "diag": diag}
 
+        # Publish into arqary.com. Best-effort: a failed insert must not discard a
+        # reconstruction that already succeeded and uploaded, so the poller can
+        # still link the assets from the URLs below.
+        model_id = create_property_model_row(
+            property_id=property_id,
+            model_name=model_name or f"Scan {tour_id}",
+            splat_url=splat_url,
+            glb_url=glb_url,
+            ply_url=ply_url,
+            mesh_url=mesh_url,
+            file_size=diag.get("splat_size") or diag.get("glb_size"),
+            splat_count=diag.get("splat_gaussians"),
+            owner_id=str(job_input.get("owner_id", "") or "").strip() or None,
+        )
+
         return {
             "ok": True,
             "tour_id": tour_id,
+            "property_id": property_id or None,
+            "session_id": session_id or None,
+            "model_id": model_id,
+            "gaussian_count": diag.get("splat_gaussians"),
             "images_processed": downloaded,
             # Top-level URLs: apps/api extractModelUrl / extractAuxUrls read these on runpod.output
             "glb_url": glb_url,
@@ -1107,6 +1219,9 @@ def handler(job):
                 "glb_url": glb_url,
                 "splat_url": splat_url,
                 "mesh_asset_url": mesh_url,
+                "model_id": model_id,
+                "property_id": property_id or None,
+                "session_id": session_id or None,
             },
             "total_seconds": round(time.time() - t0, 2),
         }
