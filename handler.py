@@ -67,7 +67,7 @@ QT_QPA_PLATFORM = os.environ.get("QT_QPA_PLATFORM", "offscreen").strip()  # offs
 def _run(cmd: list[str], *, cwd: Optional[str] = None, env: Optional[dict[str, str]] = None) -> str:
     """
     Run a command and return combined stdout/stderr (trimmed).
-    Raises CalledProcessError on non-zero exit.
+    Raises CalledProcessError on non-zero exit (stderr attached for debugging).
     """
     merged_env = os.environ.copy()
     if env:
@@ -79,10 +79,29 @@ def _run(cmd: list[str], *, cwd: Optional[str] = None, env: Optional[dict[str, s
         env=merged_env,
         text=True,
         capture_output=True,
-        check=True,
+        check=False,
     )
-    out = (p.stdout or "") + ("\n" + p.stderr if p.stderr else "")
+    out = (p.stdout or "") + ("
+" + p.stderr if p.stderr else "")
+    if p.returncode != 0:
+        tail = (out or "")[-2500:].strip()
+        raise subprocess.CalledProcessError(
+            p.returncode,
+            cmd,
+            output=p.stdout,
+            stderr=tail or (p.stderr or ""),
+        )
     return out.strip()
+
+
+def _cpe_detail(err: BaseException) -> str:
+    if not isinstance(err, subprocess.CalledProcessError):
+        return str(err)
+    tail = (err.stderr or err.output or "").strip()
+    base = f"cmd_failed rc={err.returncode} cmd={err.cmd!r}"
+    return f"{base}
+{tail}" if tail else base
+
 
 
 def _is_sigabrt(err: BaseException) -> bool:
@@ -336,7 +355,7 @@ def download_supabase_objects(
     return images_dir, downloaded
 
 
-def run_colmap(work_dir: Path, *, matcher: str = "exhaustive", max_image_size: Optional[int] = None) -> Path:
+def run_colmap(work_dir: Path, *, matcher: str = "exhaustive", max_image_size: Optional[int] = None, use_gpu: Optional[bool] = None) -> Path:
     # gaussian-splatting expects COLMAP outputs under the dataset root:
     #   <dataset>/images
     #   <dataset>/sparse/0
@@ -344,7 +363,6 @@ def run_colmap(work_dir: Path, *, matcher: str = "exhaustive", max_image_size: O
     images_dir = dataset_dir / "images"
     sparse_root = dataset_dir / "sparse"
     sparse_root.mkdir(parents=True, exist_ok=True)
-    # COLMAP mapper writes to <output_path>/<model_id>/..., we ensure at least "0" exists.
     db_path = dataset_dir / "colmap.db"
 
     matcher_norm = (matcher or "exhaustive").strip().lower()
@@ -352,13 +370,20 @@ def run_colmap(work_dir: Path, *, matcher: str = "exhaustive", max_image_size: O
         matcher_norm = "exhaustive"
     max_img = int(max_image_size) if isinstance(max_image_size, int) and max_image_size > 0 else int(COLMAP_MAX_IMAGE_SIZE)
 
-    def attempt(use_gpu: bool) -> None:
-        gpu_flag = "1" if use_gpu else "0"
-        # Ensure headless execution; prevents Qt/X11 SIGABRT on serverless workers.
-        colmap_env = {
+    def colmap_env() -> dict[str, str]:
+        return {
             "QT_QPA_PLATFORM": QT_QPA_PLATFORM or "offscreen",
             "DISPLAY": "",
         }
+
+    def clear_sparse() -> None:
+        if sparse_root.exists():
+            shutil.rmtree(sparse_root, ignore_errors=True)
+        sparse_root.mkdir(parents=True, exist_ok=True)
+
+    def extract_and_match(gpu: bool) -> None:
+        gpu_flag = "1" if gpu else "0"
+        env = colmap_env()
         print(f"[colmap] feature_extractor use_gpu={gpu_flag} max_image_size={max_img} matcher={matcher_norm}")
         _run(
             [
@@ -375,11 +400,8 @@ def run_colmap(work_dir: Path, *, matcher: str = "exhaustive", max_image_size: O
                 "--SiftExtraction.max_image_size",
                 str(max_img),
             ],
-            env=colmap_env,
+            env=env,
         )
-
-        # For photo bursts (unordered), exhaustive matching is much more robust than sequential.
-        # Sequential matching is appropriate for video-like ordered frames.
         matcher_cmd = "exhaustive_matcher" if matcher_norm == "exhaustive" else "sequential_matcher"
         print(f"[colmap] {matcher_cmd} use_gpu={gpu_flag}")
         _run(
@@ -391,34 +413,46 @@ def run_colmap(work_dir: Path, *, matcher: str = "exhaustive", max_image_size: O
                 "--SiftMatching.use_gpu",
                 gpu_flag,
             ],
-            env=colmap_env,
+            env=env,
         )
 
-        print("[colmap] mapper")
-        _run(
-            [
-                "colmap",
-                "mapper",
-                "--database_path",
-                str(db_path),
-                "--image_path",
-                str(images_dir),
-                "--output_path",
-                str(sparse_root),
-            ],
-            env=colmap_env,
-        )
+    def run_mapper(*, permissive: bool) -> None:
+        clear_sparse()
+        env = colmap_env()
+        cmd = [
+            "colmap",
+            "mapper",
+            "--database_path",
+            str(db_path),
+            "--image_path",
+            str(images_dir),
+            "--output_path",
+            str(sparse_root),
+        ]
+        if permissive:
+            # Looser thresholds help texture-poor indoor rooms with thin overlap.
+            cmd += [
+                "--Mapper.min_num_matches",
+                "8",
+                "--Mapper.init_min_num_inliers",
+                "30",
+                "--Mapper.abs_pose_min_num_inliers",
+                "15",
+                "--Mapper.filter_max_reproj_error",
+                "8",
+                "--Mapper.multiple_models",
+                "1",
+            ]
+        print(f"[colmap] mapper permissive={permissive}")
+        _run(cmd, env=env)
 
     def pick_sparse_model_dir() -> Path:
-        # COLMAP mapper writes sparse/<model_id>/...
         candidates = [p for p in sparse_root.iterdir() if p.is_dir()]
         if not candidates:
             raise RuntimeError("colmap_sparse_empty")
-        # Prefer model id "0" if present.
         zero = sparse_root / "0"
         if zero.exists() and zero.is_dir():
             return zero
-        # Otherwise pick the largest directory (most files).
         return max(candidates, key=lambda p: sum(1 for _ in p.rglob("*") if _.is_file()))
 
     def undistort_to_gs_dataset(sparse_model_dir: Path) -> Path:
@@ -430,10 +464,7 @@ def run_colmap(work_dir: Path, *, matcher: str = "exhaustive", max_image_size: O
             shutil.rmtree(undist_dir, ignore_errors=True)
         undist_dir.mkdir(parents=True, exist_ok=True)
 
-        colmap_env = {
-            "QT_QPA_PLATFORM": QT_QPA_PLATFORM or "offscreen",
-            "DISPLAY": "",
-        }
+        env = colmap_env()
         print(f"[colmap] image_undistorter sparse_model={sparse_model_dir}")
         _run(
             [
@@ -448,44 +479,63 @@ def run_colmap(work_dir: Path, *, matcher: str = "exhaustive", max_image_size: O
                 "--output_type",
                 "COLMAP",
             ],
-            env=colmap_env,
+            env=env,
         )
         ensure_colmap_sparse_zero_layout(undist_dir)
         return undist_dir
 
-    # Try GPU first (if enabled), then CPU fallback for stability.
-    want_gpu = COLMAP_USE_GPU_DEFAULT == "1"
-    if want_gpu:
+    want_gpu = COLMAP_USE_GPU_DEFAULT == "1" if use_gpu is None else bool(use_gpu)
+
+    def rebuild_db_and_features(gpu: bool) -> None:
         try:
-            attempt(True)
-            print("[colmap] mapper done (gpu)")
-        except subprocess.CalledProcessError as e:
-            print(f"[colmap] gpu failed returncode={e.returncode}")
-            tail = ((e.stderr or "")[-1500:]).strip()
-            if tail:
-                print(f"[colmap] gpu stderr tail:\n{tail}")
-            # Fallback on SIGABRT / common GPU crashes.
-            if _is_sigabrt(e) or "cuda" in (e.stderr or "").lower() or "out of memory" in (e.stderr or "").lower():
-                print("[colmap] retrying on CPU…")
-                # GPU crashes can corrupt the COLMAP DB; recreate it for CPU retry.
-                try:
-                    if db_path.exists():
-                        db_path.unlink()
-                        print("[colmap] deleted colmap.db before CPU retry")
-                except Exception as de:
-                    print(f"[colmap] could not delete colmap.db: {de}")
-                attempt(False)
-                print("[colmap] mapper done (cpu after gpu fail)")
-            else:
-                raise
-    else:
-        attempt(False)
-        print("[colmap] mapper done (cpu)")
+            if db_path.exists():
+                db_path.unlink()
+                print("[colmap] deleted colmap.db before retry")
+        except Exception as de:
+            print(f"[colmap] could not delete colmap.db: {de}")
+        extract_and_match(gpu)
+
+    # Features/match: GPU first (if enabled), then CPU on crash.
+    try:
+        if want_gpu:
+            try:
+                extract_and_match(True)
+                print("[colmap] features/match done (gpu)")
+            except subprocess.CalledProcessError as e:
+                print(f"[colmap] gpu features/match failed: {_cpe_detail(e)[:800]}")
+                if _is_sigabrt(e) or "cuda" in (e.stderr or "").lower() or "out of memory" in (e.stderr or "").lower():
+                    print("[colmap] retrying features/match on CPU...")
+                    rebuild_db_and_features(False)
+                    print("[colmap] features/match done (cpu after gpu fail)")
+                else:
+                    raise
+        else:
+            extract_and_match(False)
+            print("[colmap] features/match done (cpu)")
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"colmap_features_or_match_failed: {_cpe_detail(e)}") from e
+
+    # Mapper: default thresholds, then permissive retry (same DB — no re-extract).
+    try:
+        run_mapper(permissive=False)
+        print("[colmap] mapper done")
+    except subprocess.CalledProcessError as e1:
+        print(f"[colmap] mapper strict failed: {_cpe_detail(e1)[:800]}")
+        try:
+            run_mapper(permissive=True)
+            print("[colmap] mapper done (permissive)")
+        except subprocess.CalledProcessError as e2:
+            raise RuntimeError(
+                "colmap_mapper_failed: registration could not build a sparse model. "
+                "Reshoot with 60-80% overlap, more angles, and avoid motion blur. "
+                f"detail={_cpe_detail(e2)[:1200]}"
+            ) from e2
 
     sparse_model_dir = pick_sparse_model_dir()
     gs_dataset = undistort_to_gs_dataset(sparse_model_dir)
     print(f"[colmap] undistorted dataset ready at {gs_dataset}")
     return gs_dataset
+
 
 
 def run_gaussian_splatting(gs_source: Path, iterations: int = 500) -> Path:
@@ -1063,7 +1113,14 @@ def handler(job):
         # Auto-max quality: raise image size unless explicitly provided.
         if quality_profile in {"auto_max", "auto-max", "max"} and max_img_int is None:
             max_img_int = int(os.environ.get("COLMAP_MAX_IMAGE_SIZE", "3200") or 3200)
-        gs_source = run_colmap(work_dir, matcher=matcher, max_image_size=max_img_int)
+        use_gpu_cfg = colmap_cfg.get("use_gpu", None)
+        use_gpu_bool = None if use_gpu_cfg is None else _boolish(use_gpu_cfg)
+        gs_source = run_colmap(
+            work_dir,
+            matcher=matcher,
+            max_image_size=max_img_int,
+            use_gpu=use_gpu_bool,
+        )
 
         # 3) Train
         print("[job] running Gaussian Splatting…")
@@ -1251,7 +1308,9 @@ def handler(job):
             retryable = False
         elif "colmap" in err_lower:
             code = "COLMAP_FAILED"
-            retryable = False
+            # Capture quality issues are not fixed by blind retries, but a second
+            # attempt with exhaustive matcher (edge) can help sequential/video jobs.
+            retryable = "mapper_failed" in err_lower or "sparse_empty" in err_lower
         elif "gaussian_splatting_failed" in err_lower:
             code = "GAUSSIAN_FAILED"
             retryable = False
