@@ -81,8 +81,7 @@ def _run(cmd: list[str], *, cwd: Optional[str] = None, env: Optional[dict[str, s
         capture_output=True,
         check=False,
     )
-    out = (p.stdout or "") + ("
-" + p.stderr if p.stderr else "")
+    out = (p.stdout or "") + ("\n" + p.stderr if p.stderr else "")
     if p.returncode != 0:
         tail = (out or "")[-2500:].strip()
         raise subprocess.CalledProcessError(
@@ -99,8 +98,7 @@ def _cpe_detail(err: BaseException) -> str:
         return str(err)
     tail = (err.stderr or err.output or "").strip()
     base = f"cmd_failed rc={err.returncode} cmd={err.cmd!r}"
-    return f"{base}
-{tail}" if tail else base
+    return f"{base}\n{tail}" if tail else base
 
 
 
