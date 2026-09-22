@@ -23,6 +23,7 @@ import struct
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from urllib.parse import quote
+from asset_transfer import download_file
 
 
 
@@ -273,17 +274,15 @@ def download_images(image_urls: Iterable[str], work_dir: Path) -> Tuple[Path, in
     total_urls = len(image_urls) if hasattr(image_urls, "__len__") else None
     for i, url in enumerate(image_urls):
         try:
-            r = session.get(url, timeout=60)
-            if r.status_code < 200 or r.status_code >= 300:
-                raise RuntimeError(f"http_{r.status_code}")
             ext = url.split("?")[0].split(".")[-1].lower()
             if ext not in {"jpg", "jpeg", "png", "webp"}:
                 ext = "jpg"
             filepath = images_dir / f"img_{i:04d}.{ext}"
-            filepath.write_bytes(r.content)
+            download_file(session, url, filepath, 128 * 1024 * 1024)
             downloaded += 1
         except Exception as e:
-            print(f"[download] failed url={url} err={e}")
+            # Signed URLs and network exception messages can contain credentials.
+            print(f"[download] failed frame={i} error_type={type(e).__name__}")
 
     print(f"[download] downloaded {downloaded} / {total_urls if total_urls is not None else 'n/a'}")
     return images_dir, downloaded
@@ -330,24 +329,16 @@ def download_supabase_objects(
         try:
             enc_path = quote(p, safe="/")
             url = f"{supabase_url.rstrip('/')}/storage/v1/object/{bucket}/{enc_path}"
-            r = session.get(
-                url,
-                headers={
-                    "Authorization": f"Bearer {service_role_key}",
-                    "apikey": service_role_key,
-                },
-                timeout=60,
-            )
-            if r.status_code < 200 or r.status_code >= 300:
-                raise RuntimeError(f"http_{r.status_code}")
             ext = p.split("?")[0].split(".")[-1].lower()
             if ext not in {"jpg", "jpeg", "png", "webp"}:
                 ext = "jpg"
             filepath = images_dir / f"img_{i:04d}.{ext}"
-            filepath.write_bytes(r.content)
+            download_file(session, url, filepath, 128 * 1024 * 1024, headers={
+                "Authorization": f"Bearer {service_role_key}", "apikey": service_role_key,
+            })
             downloaded += 1
         except Exception as e:
-            print(f"[download_supabase] failed path={p} err={e}", flush=True)
+            print(f"[download_supabase] failed frame={i} error_type={type(e).__name__}", flush=True)
 
     print(f"[download_supabase] downloaded {downloaded} / {len(object_paths_list)}", flush=True)
     return images_dir, downloaded
