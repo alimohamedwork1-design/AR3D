@@ -23,6 +23,7 @@ import struct
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from urllib.parse import quote
+from asset_transfer import download_file, upload_output, extract_dataset
 
 
 
@@ -273,17 +274,15 @@ def download_images(image_urls: Iterable[str], work_dir: Path) -> Tuple[Path, in
     total_urls = len(image_urls) if hasattr(image_urls, "__len__") else None
     for i, url in enumerate(image_urls):
         try:
-            r = session.get(url, timeout=60)
-            if r.status_code < 200 or r.status_code >= 300:
-                raise RuntimeError(f"http_{r.status_code}")
             ext = url.split("?")[0].split(".")[-1].lower()
             if ext not in {"jpg", "jpeg", "png", "webp"}:
                 ext = "jpg"
             filepath = images_dir / f"img_{i:04d}.{ext}"
-            filepath.write_bytes(r.content)
+            download_file(session, url, filepath, 128 * 1024 * 1024)
             downloaded += 1
         except Exception as e:
-            print(f"[download] failed url={url} err={e}")
+            # Signed URLs and network exception messages can contain credentials.
+            print(f"[download] failed frame={i} error_type={type(e).__name__}")
 
     print(f"[download] downloaded {downloaded} / {total_urls if total_urls is not None else 'n/a'}")
     return images_dir, downloaded
@@ -330,24 +329,16 @@ def download_supabase_objects(
         try:
             enc_path = quote(p, safe="/")
             url = f"{supabase_url.rstrip('/')}/storage/v1/object/{bucket}/{enc_path}"
-            r = session.get(
-                url,
-                headers={
-                    "Authorization": f"Bearer {service_role_key}",
-                    "apikey": service_role_key,
-                },
-                timeout=60,
-            )
-            if r.status_code < 200 or r.status_code >= 300:
-                raise RuntimeError(f"http_{r.status_code}")
             ext = p.split("?")[0].split(".")[-1].lower()
             if ext not in {"jpg", "jpeg", "png", "webp"}:
                 ext = "jpg"
             filepath = images_dir / f"img_{i:04d}.{ext}"
-            filepath.write_bytes(r.content)
+            download_file(session, url, filepath, 128 * 1024 * 1024, headers={
+                "Authorization": f"Bearer {service_role_key}", "apikey": service_role_key,
+            })
             downloaded += 1
         except Exception as e:
-            print(f"[download_supabase] failed path={p} err={e}", flush=True)
+            print(f"[download_supabase] failed frame={i} error_type={type(e).__name__}", flush=True)
 
     print(f"[download_supabase] downloaded {downloaded} / {len(object_paths_list)}", flush=True)
     return images_dir, downloaded
@@ -963,7 +954,6 @@ def prepare_dataset_from_url(dataset_url: str, dataset_subset: str, work_dir: Pa
     <work_dir>/input/images (exactly where run_colmap expects them).
     """
     import zipfile
-    import urllib.request
 
     images_dir = work_dir / "input" / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
@@ -972,8 +962,9 @@ def prepare_dataset_from_url(dataset_url: str, dataset_subset: str, work_dir: Pa
     extract_path = work_dir / "extracted"
     extract_path.mkdir(parents=True, exist_ok=True)
 
-    print(f"[dataset] downloading {dataset_url}", flush=True)
-    urllib.request.urlretrieve(dataset_url, str(zip_path))
+    print("[dataset] downloading bounded archive", flush=True)
+    with requests.Session() as dataset_session:
+        download_file(dataset_session, dataset_url, zip_path, 536870912)
 
     subset = (dataset_subset or "").strip().strip("/")
     print(f"[dataset] extracting subset={subset or '(all)'}", flush=True)
@@ -985,7 +976,7 @@ def prepare_dataset_from_url(dataset_url: str, dataset_subset: str, work_dir: Pa
                 members = [m for m in names if subset.lower() in m.lower()]
         else:
             members = names
-        z.extractall(str(extract_path), members or names)
+    extract_dataset(zip_path, extract_path, members or names)
 
     exts = {".jpg", ".jpeg", ".png", ".webp"}
 
@@ -1151,6 +1142,8 @@ def handler(job):
         # The arqary.com 3d-models bucket allows 500MB, so the cap is about what a
         # browser can sort per frame rather than what Storage will accept.
         splat_max_mb = float((os.environ.get("SPLAT_MAX_MB") or "400").strip() or 400)
+        if job_input.get('output_targets') is not None:
+            splat_max_mb = min(splat_max_mb, 128)
         splat_max_gaussians = max(10000, int((splat_max_mb * 1024 * 1024) / 32))
         splat = out_dir / "point_cloud.splat"
         splat_ok = False
@@ -1197,6 +1190,15 @@ def handler(job):
             mesh_ok = try_export_mesh_glb_from_ply(ply, mesh_glb)
 
         # 6) Upload outputs.
+        output_targets = job_input.get('output_targets')
+        def upload_asset(local_path, remote_path):
+            if output_targets is not None:
+                name = remote_path.rsplit('/', 1)[-1]
+                if not isinstance(output_targets, dict) or name not in output_targets:
+                    raise RuntimeError('private_output_target_missing')
+                with requests.Session() as output_session:
+                    return upload_output(output_session, local_path, output_targets[name])
+            return upload_to_supabase(local_path, remote_path)
         # arqary.com keys the 3d-models bucket as {property_id}/{timestamp}/{file};
         # fall back to tour_id when a capture isn't attached to a property yet.
         bucket = os.environ.get("SUPABASE_SPLATS_BUCKET", "3d-models").strip() or "3d-models"
@@ -1209,7 +1211,7 @@ def handler(job):
         splat_url = None
         if splat_ok:
             try:
-                splat_url = upload_to_supabase(splat, splat_remote)
+                splat_url = upload_asset(splat, splat_remote)
                 print(f"[splat] uploaded splat_url={splat_url}", flush=True)
             except Exception as e:
                 diag["splat_upload_err"] = f"{type(e).__name__}: {e}"
@@ -1220,7 +1222,7 @@ def handler(job):
         glb_url = None
         if glb_ok:
             try:
-                glb_url = upload_to_supabase(glb, glb_remote)
+                glb_url = upload_asset(glb, glb_remote)
                 print(f"[glb] uploaded glb_url={glb_url}", flush=True)
             except Exception as e:
                 diag["glb_upload_err"] = f"{type(e).__name__}: {e}"
@@ -1229,6 +1231,8 @@ def handler(job):
 
         ply_url = None
         max_bytes = _target_max_upload_bytes()
+        if output_targets is not None:
+            max_bytes = min(max_bytes, 134217728)
         # Ensure PLY is under the limit before upload (best-effort).
         try:
             if ply.stat().st_size > max_bytes:
@@ -1237,9 +1241,9 @@ def handler(job):
             print(f"[ply] pre-upload size check/downsample failed: {e}", flush=True)
 
         try:
-            ply_url = upload_to_supabase(ply, ply_remote)
+            ply_url = upload_asset(ply, ply_remote)
         except Exception as e:
-            if _is_payload_too_large(e):
+            if _is_payload_too_large(e) or str(e) == 'output_size_limit':
                 print(f"[ply] upload too large; skipping ply upload err={e}", flush=True)
                 ply_url = None
             else:
@@ -1248,7 +1252,7 @@ def handler(job):
         mesh_url = None
         if mesh_ok and mesh_glb.exists():
             try:
-                mesh_url = upload_to_supabase(mesh_glb, mesh_remote)
+                mesh_url = upload_asset(mesh_glb, mesh_remote)
                 print(f"[mesh] uploaded mesh_url={mesh_url}", flush=True)
             except Exception as e:
                 print(f"[mesh] upload failed: {e}", flush=True)
@@ -1260,7 +1264,7 @@ def handler(job):
         # Publish into arqary.com. Best-effort: a failed insert must not discard a
         # reconstruction that already succeeded and uploaded, so the poller can
         # still link the assets from the URLs below.
-        model_id = create_property_model_row(
+        model_id = None if output_targets is not None else create_property_model_row(
             property_id=property_id,
             model_name=model_name or f"Scan {tour_id}",
             splat_url=splat_url,

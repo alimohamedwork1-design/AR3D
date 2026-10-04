@@ -62,6 +62,7 @@ RUN pip install --no-cache-dir -v --no-build-isolation /workspace/gaussian-splat
 RUN pip install --no-cache-dir -v --no-build-isolation /workspace/gaussian-splatting/submodules/fused-ssim
 
 COPY handler.py /workspace/handler.py
+COPY asset_transfer.py /workspace/asset_transfer.py
 
 CMD ["python", "-u", "/workspace/handler.py"]
 
