@@ -1,3 +1,5 @@
+FROM node:22-slim AS node
+
 FROM runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04
 
 WORKDIR /workspace
@@ -18,7 +20,16 @@ RUN apt-get update && apt-get install -y \
   libgl1 \
   libglib2.0-0 \
   libgomp1 \
+  libvulkan1 \
+  vulkan-tools \
   && rm -rf /var/lib/apt/lists/*
+
+COPY --from=node /usr/local/bin/ /usr/local/bin/
+COPY --from=node /usr/local/lib/node_modules/ /usr/local/lib/node_modules/
+
+RUN npm install -g @playcanvas/splat-transform@3.4.2 \
+  && node --version \
+  && splat-transform --version
 
 RUN pip install --no-cache-dir \
   runpod \

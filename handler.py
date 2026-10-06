@@ -563,6 +563,135 @@ def run_gaussian_splatting(gs_source: Path, iterations: int = 500) -> Path:
     return output_dir
 
 
+def _delivery_enabled(name: str, default: bool = True) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return _boolish(value)
+
+
+def build_sog_delivery(
+    ply_path: Path,
+    out_dir: Path,
+    *,
+    make_bundled: bool,
+    make_streamed: bool,
+    make_collision: bool,
+) -> Dict[str, Optional[Path]]:
+    """
+    Derive PlayCanvas-native web delivery assets from the pristine GraphDeco PLY.
+
+    Bundled SOG and Streamed SOG are CPU-safe. Collision voxel generation needs
+    a GPU/Vulkan adapter and is best-effort so reconstruction can still succeed
+    when collision generation is unavailable.
+    """
+    result: Dict[str, Optional[Path]] = {
+        "sog": None,
+        "streamed_meta": None,
+        "collision": None,
+    }
+
+    if make_bundled:
+        sog = out_dir / "scene.sog"
+        try:
+            _run([
+                "splat-transform",
+                "--overwrite",
+                "--no-tty",
+                "-g",
+                "cpu",
+                "--sh-iterations",
+                "10",
+                "--max-workers",
+                "4",
+                str(ply_path),
+                str(sog),
+            ])
+            if not sog.is_file() or sog.stat().st_size <= 0:
+                raise RuntimeError("sog_output_missing_or_empty")
+            result["sog"] = sog
+            print(f"[sog] bundled ready bytes={sog.stat().st_size}", flush=True)
+        except Exception as e:
+            print(f"[sog] bundled generation failed: {type(e).__name__}: {e}", flush=True)
+
+    if make_streamed:
+        streamed_dir = out_dir / "streamed"
+        streamed_dir.mkdir(parents=True, exist_ok=True)
+        meta = streamed_dir / "lod-meta.json"
+        try:
+            _run([
+                "splat-transform",
+                "--overwrite",
+                "--no-tty",
+                "-g",
+                "cpu",
+                "--sh-iterations",
+                "10",
+                "--max-workers",
+                "4",
+                "--lod-chunk-count",
+                str(os.environ.get("SOG_LOD_CHUNK_COUNT", "512") or "512"),
+                "--lod-chunk-extent",
+                str(os.environ.get("SOG_LOD_CHUNK_EXTENT", "16") or "16"),
+                "--lod-chunk-min",
+                str(os.environ.get("SOG_LOD_CHUNK_MIN", "8") or "8"),
+                str(ply_path),
+                str(meta),
+            ])
+            if not meta.is_file() or meta.stat().st_size <= 0:
+                raise RuntimeError("streamed_sog_meta_missing_or_empty")
+            chunk_files = [p for p in streamed_dir.rglob("*") if p.is_file()]
+            if len(chunk_files) < 2:
+                raise RuntimeError("streamed_sog_chunks_missing")
+            result["streamed_meta"] = meta
+            print(f"[sog] streamed ready files={len(chunk_files)}", flush=True)
+        except Exception as e:
+            print(f"[sog] streamed generation failed: {type(e).__name__}: {e}", flush=True)
+            shutil.rmtree(streamed_dir, ignore_errors=True)
+
+    if make_collision:
+        collision = out_dir / "collision.voxel.json"
+        try:
+            _run([
+                "splat-transform",
+                "--overwrite",
+                "--no-tty",
+                str(ply_path),
+                str(collision),
+            ])
+            if not collision.is_file() or collision.stat().st_size <= 0:
+                raise RuntimeError("collision_output_missing_or_empty")
+            result["collision"] = collision
+            print(f"[collision] voxel ready bytes={collision.stat().st_size}", flush=True)
+        except Exception as e:
+            print(f"[collision] generation skipped: {type(e).__name__}: {e}", flush=True)
+
+    return result
+
+
+def upload_streamed_sog_directory(streamed_meta: Path, remote_prefix: str) -> str:
+    """
+    Upload a complete Streamed SOG directory while preserving relative paths.
+    The meta file is uploaded last so clients never observe a manifest before
+    its referenced chunks exist.
+    """
+    root = streamed_meta.parent
+    files = [p for p in root.rglob("*") if p.is_file()]
+    if streamed_meta not in files:
+        raise RuntimeError("streamed_sog_meta_missing")
+    ordered = [p for p in files if p != streamed_meta] + [streamed_meta]
+    meta_url = ""
+    for local_path in ordered:
+        rel = local_path.relative_to(root).as_posix()
+        remote_path = f"{remote_prefix.rstrip('/')}/{rel}"
+        url = upload_to_supabase(local_path, remote_path)
+        if local_path == streamed_meta:
+            meta_url = url
+    if not meta_url:
+        raise RuntimeError("streamed_sog_meta_upload_failed")
+    return meta_url
+
+
 def upload_to_supabase(local_path: Path, remote_path: str) -> str:
     supabase_url, service_role = _supabase_credentials()
     missing = [n for n, v in [("SUPABASE_URL", supabase_url), ("SUPABASE_SERVICE_ROLE_KEY", service_role)] if not v]
@@ -599,6 +728,9 @@ def create_property_model_row(
     property_id: str,
     model_name: str,
     splat_url: Optional[str],
+    sog_url: Optional[str],
+    streamed_sog_meta_url: Optional[str],
+    collision_url: Optional[str],
     glb_url: Optional[str],
     ply_url: Optional[str],
     mesh_url: Optional[str],
@@ -619,7 +751,7 @@ def create_property_model_row(
     if not supabase_url or not service_role or not property_id:
         return None
 
-    primary = splat_url or glb_url or mesh_url
+    primary = splat_url or sog_url or glb_url or mesh_url
     if not primary:
         return None
 
@@ -627,15 +759,23 @@ def create_property_model_row(
         "property_id": property_id,
         "model_name": model_name or "ARqary Scan",
         "model_url": primary,
-        "format": "splat" if splat_url else "glb",
-        "model_type": "gaussian_splat" if splat_url else "model",
+        "format": "splat" if splat_url else ("sog" if sog_url else "glb"),
+        "model_type": "gaussian_splat" if (splat_url or sog_url) else "model",
         "source": "arqary_scanner",
         "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "lod_urls": {k: v for k, v in {
             "splat": splat_url,
+            "sog": sog_url,
+            "streamed_sog": streamed_sog_meta_url,
+            "collision": collision_url,
             "glb": glb_url,
             "ply": ply_url,
             "mesh": mesh_url,
+        }.items() if v},
+        "spatial_assets": {k: v for k, v in {
+            "sog_url": sog_url,
+            "streamed_sog_meta_url": streamed_sog_meta_url,
+            "collision_url": collision_url,
         }.items() if v},
         "ar_enabled": bool(usdz_url),
     }
@@ -1133,6 +1273,32 @@ def handler(job):
 
         # Diagnostics collected across export/upload so a failure return is self-explanatory.
         diag: Dict[str, Any] = {"ply_size": ply.stat().st_size}
+        output_targets = job_input.get("output_targets")
+        private_targets = output_targets if isinstance(output_targets, dict) else {}
+
+        # Derive the new PlayCanvas delivery formats from the pristine PLY before
+        # any downsampling. Private R2 jobs use bundled SOG because Streamed SOG
+        # is a directory of relative chunks; public storage can publish both.
+        want_sog = _delivery_enabled("SOG_DELIVERY_DEFAULT", True) and (
+            output_targets is None or "scene.sog" in private_targets
+        )
+        want_streamed = _delivery_enabled("STREAMED_SOG_DEFAULT", True) and output_targets is None
+        want_collision = _delivery_enabled("SOG_COLLISION_DEFAULT", True) and (
+            output_targets is None or "collision.voxel.json" in private_targets
+        )
+        delivery = build_sog_delivery(
+            ply,
+            out_dir,
+            make_bundled=want_sog,
+            make_streamed=want_streamed,
+            make_collision=want_collision,
+        )
+        sog = delivery.get("sog")
+        streamed_meta = delivery.get("streamed_meta")
+        collision = delivery.get("collision")
+        diag["sog_size"] = sog.stat().st_size if sog and sog.is_file() else 0
+        diag["streamed_sog"] = bool(streamed_meta)
+        diag["collision_size"] = collision.stat().st_size if collision and collision.is_file() else 0
 
         # 5) Real Gaussian splat asset (.splat) — this is what makes the web viewer
         # look photorealistic (Luma/Polycam style), unlike the point-cloud GLB.
@@ -1177,8 +1343,8 @@ def handler(job):
             diag["glb_err"] = f"{type(e).__name__}: {e}"
             print(f"[glb] convert failed: {e}", flush=True)
             glb_ok = False
-        if not glb_ok and not splat_ok:
-            return {"ok": False, "error": "export_failed_no_splat_no_glb", "diag": diag}
+        if not glb_ok and not splat_ok and not sog:
+            return {"ok": False, "error": "export_failed_no_spatial_asset", "diag": diag}
 
         # 5b) Optional: create a real triangle mesh GLB for better “complete” visuals.
         mesh_glb = out_dir / "mesh.glb"
@@ -1190,7 +1356,6 @@ def handler(job):
             mesh_ok = try_export_mesh_glb_from_ply(ply, mesh_glb)
 
         # 6) Upload outputs.
-        output_targets = job_input.get('output_targets')
         def upload_asset(local_path, remote_path):
             if output_targets is not None:
                 name = remote_path.rsplit('/', 1)[-1]
@@ -1207,7 +1372,38 @@ def handler(job):
         glb_remote = f"{asset_prefix}/point_cloud.glb"
         splat_remote = f"{asset_prefix}/point_cloud.splat"
         mesh_remote = f"{asset_prefix}/mesh.glb"
-        # Upload the Gaussian splat asset (primary for photorealistic web rendering).
+        sog_remote = f"{asset_prefix}/scene.sog"
+        collision_remote = f"{asset_prefix}/collision.voxel.json"
+        streamed_remote_prefix = f"{asset_prefix}/streamed"
+
+        sog_url = None
+        if sog and sog.is_file():
+            try:
+                sog_url = upload_asset(sog, sog_remote)
+                print(f"[sog] uploaded sog_url={sog_url}", flush=True)
+            except Exception as e:
+                diag["sog_upload_err"] = f"{type(e).__name__}: {e}"
+                print(f"[sog] upload failed: {e}", flush=True)
+
+        streamed_sog_meta_url = None
+        if streamed_meta and streamed_meta.is_file() and output_targets is None:
+            try:
+                streamed_sog_meta_url = upload_streamed_sog_directory(streamed_meta, streamed_remote_prefix)
+                print(f"[sog] uploaded streamed_sog_meta_url={streamed_sog_meta_url}", flush=True)
+            except Exception as e:
+                diag["streamed_sog_upload_err"] = f"{type(e).__name__}: {e}"
+                print(f"[sog] streamed upload failed: {e}", flush=True)
+
+        collision_url = None
+        if collision and collision.is_file():
+            try:
+                collision_url = upload_asset(collision, collision_remote)
+                print(f"[collision] uploaded collision_url={collision_url}", flush=True)
+            except Exception as e:
+                diag["collision_upload_err"] = f"{type(e).__name__}: {e}"
+                print(f"[collision] upload failed: {e}", flush=True)
+
+        # Upload the Gaussian splat asset (compatibility fallback).
         splat_url = None
         if splat_ok:
             try:
@@ -1258,7 +1454,7 @@ def handler(job):
                 print(f"[mesh] upload failed: {e}", flush=True)
                 mesh_url = None
 
-        if not splat_url and not glb_url:
+        if not splat_url and not sog_url and not glb_url:
             return {"ok": False, "error": "upload_failed_no_viewable_asset", "diag": diag}
 
         # Publish into arqary.com. Best-effort: a failed insert must not discard a
@@ -1268,6 +1464,9 @@ def handler(job):
             property_id=property_id,
             model_name=model_name or f"Scan {tour_id}",
             splat_url=splat_url,
+            sog_url=sog_url,
+            streamed_sog_meta_url=streamed_sog_meta_url,
+            collision_url=collision_url,
             glb_url=glb_url,
             ply_url=ply_url,
             mesh_url=mesh_url,
@@ -1287,13 +1486,19 @@ def handler(job):
             # Top-level URLs: apps/api extractModelUrl / extractAuxUrls read these on runpod.output
             "glb_url": glb_url,
             "ply_url": ply_url,
-            # Real Gaussian splat asset (.splat) — primary for photorealistic viewers.
+            "sog_url": sog_url,
+            "streamed_sog_meta_url": streamed_sog_meta_url,
+            "collision_url": collision_url,
+            # Legacy Gaussian splat asset retained as a compatibility fallback.
             "splat_url": splat_url,
             # Mesh GLB (triangles). Pollers look for keys like mesh_asset_url / mesh_url / glb_url.
             "mesh_asset_url": mesh_url,
             "output": {
                 "ply_url": ply_url,
                 "glb_url": glb_url,
+                "sog_url": sog_url,
+                "streamed_sog_meta_url": streamed_sog_meta_url,
+                "collision_url": collision_url,
                 "splat_url": splat_url,
                 "mesh_asset_url": mesh_url,
                 "model_id": model_id,

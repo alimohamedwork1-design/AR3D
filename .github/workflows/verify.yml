@@ -1,0 +1,33 @@
+name: Verify worker
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches:
+      - "codex/**"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Python syntax
+        run: python -m py_compile handler.py asset_transfer.py test_asset_transfer.py
+
+      - name: Transfer tests
+        run: python -m unittest -v test_asset_transfer.py
+
+      - name: Spatial delivery contract
+        shell: bash
+        run: |
+          grep -F 'FROM node:22-slim AS node' Dockerfile
+          grep -F '@playcanvas/splat-transform@3.4.2' Dockerfile
+          grep -F 'lod-meta.json' handler.py
+          grep -F 'collision.voxel.json' handler.py
+          grep -F '"sog_url": sog_url' handler.py
