@@ -1273,6 +1273,32 @@ def handler(job):
 
         # Diagnostics collected across export/upload so a failure return is self-explanatory.
         diag: Dict[str, Any] = {"ply_size": ply.stat().st_size}
+        output_targets = job_input.get("output_targets")
+        private_targets = output_targets if isinstance(output_targets, dict) else {}
+
+        # Derive the new PlayCanvas delivery formats from the pristine PLY before
+        # any downsampling. Private R2 jobs use bundled SOG because Streamed SOG
+        # is a directory of relative chunks; public storage can publish both.
+        want_sog = _delivery_enabled("SOG_DELIVERY_DEFAULT", True) and (
+            output_targets is None or "scene.sog" in private_targets
+        )
+        want_streamed = _delivery_enabled("STREAMED_SOG_DEFAULT", True) and output_targets is None
+        want_collision = _delivery_enabled("SOG_COLLISION_DEFAULT", True) and (
+            output_targets is None or "collision.voxel.json" in private_targets
+        )
+        delivery = build_sog_delivery(
+            ply,
+            out_dir,
+            make_bundled=want_sog,
+            make_streamed=want_streamed,
+            make_collision=want_collision,
+        )
+        sog = delivery.get("sog")
+        streamed_meta = delivery.get("streamed_meta")
+        collision = delivery.get("collision")
+        diag["sog_size"] = sog.stat().st_size if sog and sog.is_file() else 0
+        diag["streamed_sog"] = bool(streamed_meta)
+        diag["collision_size"] = collision.stat().st_size if collision and collision.is_file() else 0
 
         # 5) Real Gaussian splat asset (.splat) — this is what makes the web viewer
         # look photorealistic (Luma/Polycam style), unlike the point-cloud GLB.
@@ -1317,8 +1343,8 @@ def handler(job):
             diag["glb_err"] = f"{type(e).__name__}: {e}"
             print(f"[glb] convert failed: {e}", flush=True)
             glb_ok = False
-        if not glb_ok and not splat_ok:
-            return {"ok": False, "error": "export_failed_no_splat_no_glb", "diag": diag}
+        if not glb_ok and not splat_ok and not sog:
+            return {"ok": False, "error": "export_failed_no_spatial_asset", "diag": diag}
 
         # 5b) Optional: create a real triangle mesh GLB for better “complete” visuals.
         mesh_glb = out_dir / "mesh.glb"
@@ -1330,7 +1356,6 @@ def handler(job):
             mesh_ok = try_export_mesh_glb_from_ply(ply, mesh_glb)
 
         # 6) Upload outputs.
-        output_targets = job_input.get('output_targets')
         def upload_asset(local_path, remote_path):
             if output_targets is not None:
                 name = remote_path.rsplit('/', 1)[-1]
@@ -1347,7 +1372,38 @@ def handler(job):
         glb_remote = f"{asset_prefix}/point_cloud.glb"
         splat_remote = f"{asset_prefix}/point_cloud.splat"
         mesh_remote = f"{asset_prefix}/mesh.glb"
-        # Upload the Gaussian splat asset (primary for photorealistic web rendering).
+        sog_remote = f"{asset_prefix}/scene.sog"
+        collision_remote = f"{asset_prefix}/collision.voxel.json"
+        streamed_remote_prefix = f"{asset_prefix}/streamed"
+
+        sog_url = None
+        if sog and sog.is_file():
+            try:
+                sog_url = upload_asset(sog, sog_remote)
+                print(f"[sog] uploaded sog_url={sog_url}", flush=True)
+            except Exception as e:
+                diag["sog_upload_err"] = f"{type(e).__name__}: {e}"
+                print(f"[sog] upload failed: {e}", flush=True)
+
+        streamed_sog_meta_url = None
+        if streamed_meta and streamed_meta.is_file() and output_targets is None:
+            try:
+                streamed_sog_meta_url = upload_streamed_sog_directory(streamed_meta, streamed_remote_prefix)
+                print(f"[sog] uploaded streamed_sog_meta_url={streamed_sog_meta_url}", flush=True)
+            except Exception as e:
+                diag["streamed_sog_upload_err"] = f"{type(e).__name__}: {e}"
+                print(f"[sog] streamed upload failed: {e}", flush=True)
+
+        collision_url = None
+        if collision and collision.is_file():
+            try:
+                collision_url = upload_asset(collision, collision_remote)
+                print(f"[collision] uploaded collision_url={collision_url}", flush=True)
+            except Exception as e:
+                diag["collision_upload_err"] = f"{type(e).__name__}: {e}"
+                print(f"[collision] upload failed: {e}", flush=True)
+
+        # Upload the Gaussian splat asset (compatibility fallback).
         splat_url = None
         if splat_ok:
             try:
@@ -1398,7 +1454,7 @@ def handler(job):
                 print(f"[mesh] upload failed: {e}", flush=True)
                 mesh_url = None
 
-        if not splat_url and not glb_url:
+        if not splat_url and not sog_url and not glb_url:
             return {"ok": False, "error": "upload_failed_no_viewable_asset", "diag": diag}
 
         # Publish into arqary.com. Best-effort: a failed insert must not discard a
@@ -1408,6 +1464,9 @@ def handler(job):
             property_id=property_id,
             model_name=model_name or f"Scan {tour_id}",
             splat_url=splat_url,
+            sog_url=sog_url,
+            streamed_sog_meta_url=streamed_sog_meta_url,
+            collision_url=collision_url,
             glb_url=glb_url,
             ply_url=ply_url,
             mesh_url=mesh_url,
@@ -1427,13 +1486,19 @@ def handler(job):
             # Top-level URLs: apps/api extractModelUrl / extractAuxUrls read these on runpod.output
             "glb_url": glb_url,
             "ply_url": ply_url,
-            # Real Gaussian splat asset (.splat) — primary for photorealistic viewers.
+            "sog_url": sog_url,
+            "streamed_sog_meta_url": streamed_sog_meta_url,
+            "collision_url": collision_url,
+            # Legacy Gaussian splat asset retained as a compatibility fallback.
             "splat_url": splat_url,
             # Mesh GLB (triangles). Pollers look for keys like mesh_asset_url / mesh_url / glb_url.
             "mesh_asset_url": mesh_url,
             "output": {
                 "ply_url": ply_url,
                 "glb_url": glb_url,
+                "sog_url": sog_url,
+                "streamed_sog_meta_url": streamed_sog_meta_url,
+                "collision_url": collision_url,
                 "splat_url": splat_url,
                 "mesh_asset_url": mesh_url,
                 "model_id": model_id,
