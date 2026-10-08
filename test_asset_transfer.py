@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from asset_transfer import download_file, upload_output, extract_dataset
+from asset_transfer import download_file, upload_output, extract_dataset, reject_job_credentials
 import zipfile
 import stat
 
@@ -44,6 +44,14 @@ class TransferTests(unittest.TestCase):
 
     def transfer(self, response, limit=5):
         return download_file(Session(response), 'https://fixture.invalid/?signature=private', self.path, limit)
+
+    def test_rejects_job_payload_credentials_before_work(self):
+        for key in ("supabase_service_role_key", "supabase_service_key",
+                    "service_role_key", "SUPABASE_SERVICE_ROLE_KEY"):
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(RuntimeError, "forbidden_job_credentials"):
+                    reject_job_credentials({"tour_id": "test", key: ""})
+        reject_job_credentials({"tour_id": "test", "output_targets": {"scene.sog": {"reference": "opaque"}}})
 
     def test_streamed_file_is_committed_only_when_complete(self):
         response = Response([b'abc', b'de'], 5)
