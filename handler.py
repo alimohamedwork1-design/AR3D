@@ -23,33 +23,25 @@ import struct
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from urllib.parse import quote
-from asset_transfer import download_file, upload_output, extract_dataset
+from asset_transfer import download_file, upload_output, extract_dataset, reject_job_credentials
 
-
-
-# Per-job overrides (Lovable Cloud hides service role from RunPod env UI;
-# scan-splat-start injects URL + key into the job input instead).
-_JOB_SUPABASE_URL = ""
-_JOB_SUPABASE_KEY = ""
 
 
 def _supabase_credentials() -> tuple[str, str]:
     """
-    Read at call time (not only import) so RunPod-injected env is visible.
-    Job-input overrides win so Lovable Cloud can supply the service role
-    without exposing it in the dashboard. Service role is required for
-    Storage PUT / property_models writes (not the anon key).
+    Read worker-only runtime environment secrets at call time.
+    Never accept credential overrides from a RunPod job input: those payloads
+    may appear in provider logs and are not a privileged secret channel.
+    Signed private output targets do not require a Supabase service key.
     """
     url = (
-        _JOB_SUPABASE_URL
-        or os.environ.get("SUPABASE_URL")
+        os.environ.get("SUPABASE_URL")
         or os.environ.get("NEXT_PUBLIC_SUPABASE_URL")
         or os.environ.get("EXPO_PUBLIC_SUPABASE_URL")
         or ""
     ).strip()
     key = (
-        _JOB_SUPABASE_KEY
-        or os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+        os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
         or os.environ.get("SUPABASE_SERVICE_KEY")
         or os.environ.get("SERVICE_ROLE_KEY")
         or ""
@@ -1172,16 +1164,8 @@ def prepare_dataset_from_url(dataset_url: str, dataset_subset: str, work_dir: Pa
 
 
 def handler(job):
-    global _JOB_SUPABASE_URL, _JOB_SUPABASE_KEY
     t0 = time.time()
     job_input = job.get("input", {}) or {}
-    # Prefer per-job creds from Edge (Lovable Cloud); fall back to worker env.
-    _JOB_SUPABASE_URL = str(job_input.get("supabase_url") or "").strip()
-    _JOB_SUPABASE_KEY = str(
-        job_input.get("supabase_service_role_key")
-        or job_input.get("supabase_service_key")
-        or ""
-    ).strip()
     image_urls = job_input.get("image_urls", []) or []
     dataset_url = str(job_input.get("dataset_url", "") or "").strip()
     dataset_subset = str(job_input.get("dataset_subset", "truck") or "truck").strip()
@@ -1203,6 +1187,8 @@ def handler(job):
     work_dir = Path(f"/workspace/job_{tour_id}")
 
     try:
+        # Reject obsolete job-carried DB secrets before any transfer or billable work.
+        reject_job_credentials(job_input)
         if not dataset_url and not image_urls and not has_supabase_paths:
             return {"ok": False, "error": "no_image_urls_or_supabase_paths", "error_code": "INSUFFICIENT_IMAGES", "retryable": False}
         if image_urls and len(image_urls) < 10:
@@ -1538,8 +1524,6 @@ def handler(job):
             "total_seconds": round(time.time() - t0, 2),
         }
     finally:
-        _JOB_SUPABASE_URL = ""
-        _JOB_SUPABASE_KEY = ""
         print(f"[job] total_seconds={time.time() - t0:.2f} tour_id={tour_id}", flush=True)
         if work_dir.exists():
             shutil.rmtree(work_dir, ignore_errors=True)
