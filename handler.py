@@ -25,6 +25,9 @@ from urllib3.util.retry import Retry
 from urllib.parse import quote
 from asset_transfer import download_file, upload_output, extract_dataset, reject_job_credentials
 
+# Immutable source build provenance injected when GHCR image is built.
+WORKER_BUILD_SHA = os.environ.get('ARQARY_WORKER_BUILD_SHA', 'unknown')[:64]
+
 
 
 def _supabase_credentials() -> tuple[str, str]:
@@ -1165,6 +1168,7 @@ def prepare_dataset_from_url(dataset_url: str, dataset_subset: str, work_dir: Pa
 
 def handler(job):
     t0 = time.time()
+    print(f"[worker] revision={WORKER_BUILD_SHA}", flush=True)
     job_input = job.get("input", {}) or {}
     image_urls = job_input.get("image_urls", []) or []
     dataset_url = str(job_input.get("dataset_url", "") or "").strip()
@@ -1463,6 +1467,7 @@ def handler(job):
 
         return {
             "ok": True,
+            "worker_build_sha": WORKER_BUILD_SHA,
             "tour_id": tour_id,
             "property_id": property_id or None,
             "session_id": session_id or None,
@@ -1518,6 +1523,7 @@ def handler(job):
             retryable = False
         return {
             "ok": False,
+            "worker_build_sha": WORKER_BUILD_SHA,
             "error": msg,
             "error_code": code,
             "retryable": retryable,

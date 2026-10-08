@@ -4,6 +4,9 @@ FROM runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04
 
 WORKDIR /workspace
 
+ARG ARQARY_BUILD_SHA=unknown
+ENV ARQARY_WORKER_BUILD_SHA=${ARQARY_BUILD_SHA}
+
 ENV CUDA_HOME=/usr/local/cuda
 ENV FORCE_CUDA=1
 # Keep this conservative; you can override in RunPod env if needed.

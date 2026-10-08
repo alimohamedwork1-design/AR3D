@@ -18,10 +18,10 @@ jobs:
           python-version: "3.10"
 
       - name: Python syntax
-        run: python -m py_compile handler.py asset_transfer.py test_asset_transfer.py
+        run: python -m py_compile handler.py asset_transfer.py test_asset_transfer.py test_worker_provenance.py
 
       - name: Transfer tests
-        run: python -m unittest -v test_asset_transfer.py
+        run: python -m unittest -v test_asset_transfer.py test_worker_provenance.py
 
       - name: Spatial delivery contract
         shell: bash
