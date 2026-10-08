@@ -1,4 +1,20 @@
 """Bounded worker transfers. No cloud credentials, GPU imports or network at import."""
+
+
+def reject_job_credentials(job_input):
+    """No privileged credentials in third-party job inputs, even empty placeholders."""
+    if not isinstance(job_input, dict):
+        raise RuntimeError("invalid_job_input")
+    forbidden = (
+        "supabase_service_role_key",
+        "supabase_service_key",
+        "service_role_key",
+        "SUPABASE_SERVICE_ROLE_KEY",
+    )
+    if any(key in job_input for key in forbidden):
+        raise RuntimeError("forbidden_job_credentials")
+
+
 import time
 import re
 from urllib.parse import urlparse
