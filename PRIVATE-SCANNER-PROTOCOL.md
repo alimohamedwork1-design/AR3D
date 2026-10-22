@@ -1,0 +1,17 @@
+# Private Scanner contract v1 — source only
+
+Platform owner: `alimohamedwork1-design/arqary` PR89, `scanRunpodContract.ts`. Worker owner: this repository's `private_scan.py` and handler hooks. Mobile owner: native-scanner PR1. This adds a source connection, not a deployed endpoint.
+
+Private fields (`dispatch_id`, `protocol_version` or `output_targets`) force strict validation before downloads/training. Missing/invalid protocol never falls back to public Supabase upload or `property_models` writes. Legacy non-scanner jobs are unchanged. Private execution defaults **off**, even when backend execution is later enabled. The existing backend compile-time execution gate also stays false.
+
+Required reviewed worker settings: `ARQARY_PRIVATE_PROTOCOL_ENABLED=true`, exact comma-separated `ARQARY_INPUT_HOSTS` and `ARQARY_OUTPUT_HOSTS` (R2 hostnames, no schemes), after separate authorization/licence/deployment review. No values are configured by this source pass. Use a dedicated private worker without Supabase service credentials. Never pass those credentials in job input. It needs no database access.
+
+Input contains `protocol_version=arqary-private-scan-v1`, Gaussian mode, immutable dispatch/owner/session UUIDs, `tour_id=dispatch_id`, ordered image metadata/URLs, approved canonical dataset digest and exact output targets. Maximum500 images/2GiB aggregate/128MiB per image. Every downloaded original's length and8MiB-part SHA-256 are checked before COLMAP. Signed URLs are transfer capabilities; provider invocation requires per-scan transfer/spending approval and a server claim. Manifest checks are not financial authorization.
+
+Successful private output contains only protocol/algorithm, dispatch/dataset binding and planned artifact ID/name/bytes/SHA-256. Each hash measures the local uploaded model bytes. The platform then independently streams the private object, checks structure/length/hash/job/ownership, and registers it privately. Neither worker digest nor elapsed runtime constitutes a cost receipt. Cancellation remains RunPod's documented operation; uncertain submissions must not be retried automatically. No result is auto-published.
+
+The separately named `nerf-aqary` repository currently runs GraphDeco Gaussian training and public Supabase updates, not an actual NeRF pipeline. It is intentionally excluded by the platform private contract. Do not route private NeRF jobs to it or rename Gaussian output as NeRF.
+
+**Commercial gate:** Dockerfile clones GraphDeco Gaussian Splatting. Its upstream licence permits noncommercial research/evaluation under the reviewed default terms; commercial permission or a reviewed replacement is required before ARqary commercial use. No licence rights, price, budget or deployment are inferred. Mesh generation is optional and must not be promised when dependencies/output are absent. No worker image was built or deployed.
+
+Non-build tests: `python -B -m unittest test_asset_transfer.py test_private_scan.py`; platform cross-repository test `node scripts/test-ecosystem-worker-contract.mjs --ar3d <this-checkout> --nerf <legacy-checkout> --python <python>`. Synthetic files only; no requests/GPU imports or inference. Native/GPU output and deployed private transport remain IMPLEMENTED_UNVERIFIED. Existing main-only image workflow and codex-branch/PR verification workflows must not be triggered without authorization; development commits use skip-ci on the integration branch.

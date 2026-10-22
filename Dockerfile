@@ -74,6 +74,7 @@ RUN pip install --no-cache-dir -v --no-build-isolation /workspace/gaussian-splat
 
 COPY handler.py /workspace/handler.py
 COPY asset_transfer.py /workspace/asset_transfer.py
+COPY private_scan.py /workspace/private_scan.py
 
 CMD ["python", "-u", "/workspace/handler.py"]
 
