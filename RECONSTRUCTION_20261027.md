@@ -28,6 +28,10 @@ The corrected implementation stops densification before a clone/split pass can e
 
 The exact `photogrammetry_quality` operator action uses the owned image-only fixture and 3,000 fixed iterations; client-supplied options are rejected. It returns a training-view PNG and includes the full PLY only when it is at most 8 MB. Larger geometry stays omitted from this diagnostic response, rather than exceeding provider response limits. No customer processing is enabled by this action.
 
+Fixed-source GPU regression `f1129699-78ea-4a4e-a1ba-60d87d627dfb-u1` completed all 3,000 iterations on worker `myn51716on32b2` in 139,207 ms. Densification froze at iteration 1,101; final population was 134,998, below the unchanged 200,000 limit. Loss improved from 0.406911 to 0.111359. The worker reported a 31,861,005-byte PLY and SHA-256 `f3f2b55f9a3abce7b1b9a15c77f7c1711af0039005be10edb2e4dfbcc1005f94`; the full file was omitted by the diagnostic response cap, so these are worker-reported metadata, not independent full-file verification. The returned training preview shows a recognizable textured cube with floor/background floaters. Last training-view PSNR was 15.35 dB; this is neither held-out validation nor acceptance for real-property quality. See `density-budget-proof-20261027.json`.
+
+An earlier fixed-source attempt (`7da2e616-64ea-4db9-b365-b00e83751d04-u2`) was no longer available from Runpod when the chat resumed. Its outcome is explicitly unverified. The recorded regression above was a new bounded diagnostic after checking that no job remained running. No provider charge is inferred from missing results or elapsed time.
+
 ## Private protocol and activation
 
 Only exact operator diagnostic actions and the existing `arqary-private-scan-v1` protocol are routed. Arbitrary public legacy jobs are rejected. Private jobs remain disabled by default (`ARQARY_PRIVATE_PROTOCOL_ENABLED`); enabling them also needs scoped input/output host allowlists and the existing manifest, identity and byte-integrity checks. Do not pass arbitrary hosts or credentials in job payloads.
