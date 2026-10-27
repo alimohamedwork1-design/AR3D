@@ -344,6 +344,9 @@ def run_colmap(work_dir: Path, *, matcher: str = "exhaustive", max_image_size: O
     # gaussian-splatting expects COLMAP outputs under the dataset root:
     #   <dataset>/images
     #   <dataset>/sparse/0
+    if os.environ.get("COLMAP_PYTHON_ENGINE", "1") == "1":
+        from gsplat_backend import prepare_scene
+        return prepare_scene(work_dir, max_image_size or 1600)
     dataset_dir = work_dir / "input"
     images_dir = dataset_dir / "images"
     sparse_root = dataset_dir / "sparse"
@@ -523,39 +526,18 @@ def run_colmap(work_dir: Path, *, matcher: str = "exhaustive", max_image_size: O
 
 
 
-def run_gaussian_splatting(gs_source: Path, iterations: int = 500) -> Path:
-    # gs_source is e.g. /workspace/job_<id>/input_undist
-    work_root = gs_source.parent
-    output_dir = work_root / "output"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    gs_path = Path("/workspace/gaussian-splatting/train.py")
-    if not gs_path.exists():
-        raise RuntimeError("gaussian-splatting not installed in image")
-
-    # Official GraphDeco train.py does: args.save_iterations.append(args.iterations) — final iter is always saved.
-    print(f"[gs] training iterations={iterations} source={gs_source}")
-    p = subprocess.run(
-        [
-            "python",
-            str(gs_path),
-            "-s",
-            str(gs_source),
-            "--model_path",
-            str(output_dir),
-            "--iterations",
-            str(iterations),
-            "--quiet",
-        ],
-        capture_output=True,
-        text=True,
-        cwd="/workspace/gaussian-splatting",
-    )
-    if p.returncode != 0:
-        tail = ((p.stderr or "")[-2000:]).strip()
-        raise RuntimeError(f"gaussian_splatting_failed: {tail or 'unknown_error'}")
-
-    print("[gs] done")
+def run_gaussian_splatting(gs_source: Path, iterations: int = 3000) -> Path:
+    # The Apache-2.0 gsplat backend replaces the GraphDeco executable entirely.
+    output_dir = gs_source.parent / "output"
+    script = Path(__file__).with_name("gsplat_backend.py")
+    limit = int(os.environ.get("GS_MAX_ITERATIONS", "15000"))
+    if not 1 <= iterations <= min(15000, limit):
+        raise RuntimeError("invalid_training_budget")
+    process = subprocess.run(["python", str(script), "--source", str(gs_source),
+        "--output", str(output_dir), "--iterations", str(iterations)],
+        capture_output=True, text=True, timeout=450)
+    if process.returncode != 0:
+        raise RuntimeError("gsplat_training_failed")
     return output_dir
 
 
@@ -1194,10 +1176,10 @@ def handler(job):
     session_id = str(job_input.get("session_id", "") or "").strip()
     model_name = str(job_input.get("model_name", "") or "").strip()
     quality_profile = str(job_input.get("quality_profile", "") or "").strip().lower()
-    iterations = int(job_input.get("iterations", 15000) or 15000)
+    iterations = int(job_input.get("iterations") or os.environ.get("GS_ITERATIONS_DEFAULT", "3000"))
     # Auto-max quality mode: bump defaults unless explicitly set.
     if quality_profile in {"auto_max", "auto-max", "max"} and ("iterations" not in job_input):
-        iterations = int(os.environ.get("GS_ITERATIONS_DEFAULT", "30000") or 30000)
+        iterations = int(os.environ.get("GS_ITERATIONS_DEFAULT", "3000") or 3000)
 
     has_supabase_paths = isinstance(supabase_image_paths, list) and len(supabase_image_paths) > 0 and bool(supabase_bucket)
     work_dir = Path(f"/workspace/job_{tour_id}")
@@ -1562,5 +1544,6 @@ def handler(job):
             shutil.rmtree(work_dir, ignore_errors=True)
 
 
-runpod.serverless.start({"handler": handler})
+if __name__ == "__main__":
+    runpod.serverless.start({"handler": handler})
 
