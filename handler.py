@@ -24,6 +24,10 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from urllib.parse import quote
 from asset_transfer import download_file, upload_output, extract_dataset, reject_job_credentials
+from private_scan import validate_private_job, verify_private_images, preserve_private_outputs
+
+# Immutable source build provenance injected when GHCR image is built.
+WORKER_BUILD_SHA = os.environ.get('ARQARY_WORKER_BUILD_SHA', 'unknown')[:64]
 
 
 
@@ -1165,7 +1169,19 @@ def prepare_dataset_from_url(dataset_url: str, dataset_subset: str, work_dir: Pa
 
 def handler(job):
     t0 = time.time()
+    print(f"[worker] revision={WORKER_BUILD_SHA}", flush=True)
     job_input = job.get("input", {}) or {}
+    private = None
+    # Private Scanner jobs cannot fall back to the legacy public-output path.
+    if isinstance(job_input, dict) and any(key in job_input for key in ('dispatch_id', 'protocol_version', 'output_targets')):
+        try:
+            private = validate_private_job(job_input,
+                enabled=os.environ.get('ARQARY_PRIVATE_PROTOCOL_ENABLED') == 'true',
+                input_origins=os.environ.get('ARQARY_INPUT_HOSTS', '').split(','),
+                output_origins=os.environ.get('ARQARY_OUTPUT_HOSTS', '').split(','))
+            job_input = private
+        except Exception:
+            return {'ok': False, 'error_code': 'PRIVATE_PROTOCOL_REJECTED', 'retryable': False}
     image_urls = job_input.get("image_urls", []) or []
     dataset_url = str(job_input.get("dataset_url", "") or "").strip()
     dataset_subset = str(job_input.get("dataset_subset", "truck") or "truck").strip()
@@ -1210,6 +1226,8 @@ def handler(job):
             images_dir, downloaded = download_images(image_urls, work_dir)
         if downloaded < 10:
             return {"ok": False, "error": f"downloaded_only_{downloaded}"}
+        if private is not None:
+            verify_private_images(private, images_dir)
 
         # 2) COLMAP (gpu -> cpu fallback)
         print("[job] running COLMAP…")
@@ -1342,6 +1360,17 @@ def handler(job):
             mesh_ok = try_export_mesh_glb_from_ply(ply, mesh_glb)
 
         # 6) Upload outputs.
+        if private is not None:
+            def private_transfer(path, target):
+                with requests.Session() as output_session:
+                    return upload_output(output_session, path, target)
+            return preserve_private_outputs(private, {
+                'point_cloud.ply': ply,
+                'point_cloud.splat': splat if splat_ok else None,
+                'point_cloud.glb': glb if glb_ok else None,
+                'mesh.glb': mesh_glb if mesh_ok else None,
+            }, private_transfer)
+
         def upload_asset(local_path, remote_path):
             if output_targets is not None:
                 name = remote_path.rsplit('/', 1)[-1]
@@ -1463,6 +1492,7 @@ def handler(job):
 
         return {
             "ok": True,
+            "worker_build_sha": WORKER_BUILD_SHA,
             "tour_id": tour_id,
             "property_id": property_id or None,
             "session_id": session_id or None,
@@ -1494,6 +1524,8 @@ def handler(job):
             "total_seconds": round(time.time() - t0, 2),
         }
     except Exception as e:
+        if private is not None:
+            return {'ok': False, 'error_code': 'PRIVATE_RECONSTRUCTION_FAILED', 'retryable': False}
         msg = str(e)
         err_lower = msg.lower()
         if "need_at_least_10_images" in err_lower or "downloaded_only_" in err_lower or "dataset_extract_failed" in err_lower or "dataset" in err_lower:
@@ -1518,6 +1550,7 @@ def handler(job):
             retryable = False
         return {
             "ok": False,
+            "worker_build_sha": WORKER_BUILD_SHA,
             "error": msg,
             "error_code": code,
             "retryable": retryable,
