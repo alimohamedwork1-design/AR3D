@@ -60,7 +60,7 @@ def run():
         return stats
 
 
-def photogrammetry_run():
+def photogrammetry_run(iterations=120):
     from photogrammetry_fixture import generate
     from gsplat_backend import prepare_scene,load_scene,train_arrays
     with tempfile.TemporaryDirectory(prefix='arqary-photo-smoke-') as directory:
@@ -68,11 +68,16 @@ def photogrammetry_run():
         generate(root/'input/images')
         scene=prepare_scene(root,max_image_size=640)
         points,colors,views=load_scene(scene,max_side=640)
-        stats=train_arrays(points,colors,views,root/'output',iterations=120,deadline_seconds=300)
+        stats=train_arrays(points,colors,views,root/'output',iterations=iterations,deadline_seconds=300)
         data=next((root/'output').rglob('point_cloud.ply')).read_bytes()
         stats.update(fixture_kind='original_raytraced_cube_images_only',camera_estimation_verified=True,
             sparse_points=len(points),source_scope='owned_synthetic_only',ply_bytes=len(data),
-            ply_sha256=hashlib.sha256(data).hexdigest(),ply_base64=base64.b64encode(data).decode())
+            ply_sha256=hashlib.sha256(data).hexdigest(),
+            training_preview_base64=base64.b64encode((root/'output/training-preview.png').read_bytes()).decode())
+        if len(data)<=8_000_000:
+            stats['ply_base64']=base64.b64encode(data).decode()
+        else:
+            stats['ply_omitted']='operator_response_size_limit'
         return stats
 
 
