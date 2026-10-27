@@ -26,6 +26,8 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
+          build-args: |
+            ARQARY_BUILD_SHA=${{ github.sha }}
           tags: |
             ghcr.io/alimohamedwork1-design/ar3d:latest
             ghcr.io/alimohamedwork1-design/ar3d:${{ github.sha }}
