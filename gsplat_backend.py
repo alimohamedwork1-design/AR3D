@@ -122,11 +122,18 @@ def train_arrays(points, colors, views, output, *, iterations=3000, deadline_sec
     state = strategy.initialize_state(scene_scale=scene_scale)
     started = time.monotonic()
     losses = []
+    density_frozen_at = None
     for step in range(iterations):
         if time.monotonic()-started > deadline_seconds:
             raise TimeoutError('training_deadline_exceeded')
         if len(parameters['means']) > max_gaussians:
             raise RuntimeError('gaussian_count_budget_exceeded')
+        # DefaultStrategy's clone/split pass can at most double the population
+        # (screen-space splitting is disabled). Stop growth before that pass can
+        # exceed the cap, and continue optimizing the existing Gaussians.
+        if 2*len(parameters['means']) > max_gaussians and density_frozen_at is None:
+            strategy.refine_stop_iter = min(strategy.refine_stop_iter, step)
+            density_frozen_at = step
         pixels,intrinsic,pose = views[step % len(views)]
         target = torch.tensor(pixels,device='cuda')[None]
         rendered,_,info = rasterization(means=parameters['means'],quats=parameters['quats'],
@@ -154,8 +161,14 @@ def train_arrays(points, colors, views, output, *, iterations=3000, deadline_sec
     path = output / 'point_cloud' / ('iteration_'+str(iterations)) / 'point_cloud.ply'
     path.parent.mkdir(parents=True,exist_ok=True)
     export_splats(**{key:value.detach() for key,value in parameters.items()},format='ply',save_to=str(path))
+    from PIL import Image
+    preview = rendered[0].detach().clamp(0,1).cpu().numpy()
+    Image.fromarray(np.round(preview*255).astype('uint8')).save(output/'training-preview.png')
+    mse = float(torch.mean((rendered.detach()-target)**2))
     stats = {'engine':'gsplat','version':'1.5.3','license':'Apache-2.0','iterations':iterations,
         'views':len(views),'gaussians':len(parameters['means']),'first_loss':losses[0],'last_loss':losses[-1],
+        'last_training_view_psnr_db':-10*math.log10(max(mse,1e-12)),
+        'max_gaussians':max_gaussians,'density_frozen_at':density_frozen_at,
         'seconds':round(time.monotonic()-started,3),'coordinate_space':'sfm_relative_not_metric'}
     (output/'training-stats.json').write_text(json.dumps(stats,allow_nan=False))
     return stats

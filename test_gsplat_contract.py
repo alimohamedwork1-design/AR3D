@@ -18,7 +18,8 @@ class ReconstructionContracts(unittest.TestCase):
 
     def test_no_public_or_arbitrary_operator_input(self):
         for value in [None,{},[],{'input':{}},{'input':{'dataset_url':'https://invalid.test'}},
-                      {'input':{'action':'synthetic_smoke','iterations':999999}}]:
+                      {'input':{'action':'synthetic_smoke','iterations':999999}},
+                      {'input':{'action':'photogrammetry_quality','iterations':999999}}]:
             self.assertEqual(handler(value)['failure_code'],'private_reconstruction_not_yet_enabled')
 
     def test_reproducible_source_bound_package(self):

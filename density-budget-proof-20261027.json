@@ -1,0 +1,55 @@
+{
+  "endpoint": "0v3b5pbqye54nc",
+  "source_sha256": "4cc92ebbfefb8b6b8d77bb5f04bb492fe28b668a2e5f308b10159b6ffc088d82",
+  "baseline_failure": {
+    "job_id": "64104e64-7a4f-40e5-8717-78381bedb624-u1",
+    "source_sha256": "c8c6cc812b8b0622303b8ed9b5c106bacc3d4dbaa3e888a5c1e71116f5216733",
+    "status": "FAILED",
+    "execution_ms": 124306,
+    "error": "gaussian_count_budget_exceeded"
+  },
+  "unrecovered_attempt": {
+    "job_id": "7da2e616-64ea-4db9-b365-b00e83751d04-u2",
+    "status_endpoint_http": 404,
+    "outcome": "not_recovered_after_chat_pause; no success or failure inferred"
+  },
+  "fixed_regression": {
+    "delayTime": 27884,
+    "executionTime": 139207,
+    "id": "f1129699-78ea-4a4e-a1ba-60d87d627dfb-u1",
+    "output": {
+      "camera_estimation_verified": true,
+      "coordinate_space": "sfm_relative_not_metric",
+      "density_frozen_at": 1101,
+      "engine": "gsplat",
+      "first_loss": 0.40691089630126953,
+      "fixture_kind": "original_raytraced_cube_images_only",
+      "gaussians": 134998,
+      "iterations": 3000,
+      "last_loss": 0.1113593801856041,
+      "last_training_view_psnr_db": 15.354650494408371,
+      "license": "Apache-2.0",
+      "max_gaussians": 200000,
+      "ply_bytes": 31861005,
+      "ply_omitted": "operator_response_size_limit",
+      "ply_sha256": "f3f2b55f9a3abce7b1b9a15c77f7c1711af0039005be10edb2e4dfbcc1005f94",
+      "seconds": 129.066,
+      "source_scope": "owned_synthetic_only",
+      "sparse_points": 4890,
+      "version": "1.5.3",
+      "views": 12
+    },
+    "status": "COMPLETED",
+    "workerId": "myn51716on32b2"
+  },
+  "artifact_verification": {
+    "full_ply_downloaded": false,
+    "ply_size_and_sha256": "worker_reported",
+    "training_preview_saved": true,
+    "visual_review": "recognizable textured cube; floor/background floaters remain",
+    "held_out_quality_accepted": false,
+    "metric_accuracy_verified": false,
+    "physical_capture_verified": false
+  },
+  "private_customer_execution_enabled": false
+}

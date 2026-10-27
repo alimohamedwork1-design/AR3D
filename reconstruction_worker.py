@@ -17,6 +17,9 @@ def handler(job):
     if body=={'action':'photogrammetry_smoke'}:
         from gsplat_smoke import photogrammetry_run
         return photogrammetry_run()
+    if body=={'action':'photogrammetry_quality'}:
+        from gsplat_smoke import photogrammetry_run
+        return photogrammetry_run(iterations=3000)
     if isinstance(body,dict) and body.get('protocol_version')=='arqary-private-scan-v1':
         from handler import handler as private_handler
         return private_handler(job)
