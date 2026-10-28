@@ -22,6 +22,8 @@ from pathlib import Path
 import stat
 import zipfile
 import shutil
+import base64
+import json
 
 
 def extract_dataset(archive, destination, members=None):
@@ -61,17 +63,23 @@ def upload_output(session, local_path, target):
     url = str(target.get('url', ''))
     reference = str(target.get('reference', ''))
     parsed = urlparse(url)
-    if parsed.scheme != 'https' or not re.fullmatch(r'[a-f0-9]{32}\.r2\.cloudflarestorage\.com', parsed.hostname or ''):
+    supabase = parsed.hostname == 'topvfivrvbuyachzlsnd.supabase.co'
+    if parsed.scheme != 'https' or parsed.username or parsed.password or parsed.fragment or parsed.port not in (None, 443) or not (supabase or re.fullmatch(r'[a-f0-9]{32}\.r2\.cloudflarestorage\.com', parsed.hostname or '')):
         raise RuntimeError('invalid_output_target')
     if not re.fullmatch(r'r2:[a-f0-9-]{36}/[A-Za-z0-9._-]+', reference):
         raise RuntimeError('invalid_output_reference')
+    asset, filename = reference[3:].split('/', 1)
+    if supabase and not re.fullmatch(r'/storage/v1/object/upload/sign/arqary-private-assets/private/[a-f0-9-]{36}/[a-f0-9-]{36}/' + re.escape(asset) + '/' + re.escape(filename), parsed.path):
+        raise RuntimeError('invalid_output_target')
     size = Path(local_path).stat().st_size
     if not 0 < size <= 134217728:
         raise RuntimeError('output_size_limit')
     try:
         with Path(local_path).open('rb') as data:
-            with session.put(url, data=data, headers={'Content-Type': 'application/octet-stream',
-                             'Content-Length': str(size), 'If-None-Match': '*'},
+            headers = {'Content-Type': 'application/octet-stream', 'Content-Length': str(size), 'If-None-Match': '*'}
+            if supabase:
+                headers['x-metadata'] = base64.b64encode(json.dumps({'assetId': asset}).encode()).decode()
+            with session.put(url, data=data, headers=headers,
                              allow_redirects=False, timeout=(10, 180)) as response:
                 if response.status_code != 412 and not 200 <= response.status_code < 300:
                     raise RuntimeError('output_http_' + str(response.status_code))
