@@ -4,6 +4,8 @@ from pathlib import Path
 from asset_transfer import download_file, upload_output, extract_dataset, reject_job_credentials
 import zipfile
 import stat
+import base64
+import json
 
 
 class Response:
@@ -100,6 +102,22 @@ class TransferTests(unittest.TestCase):
         self.path.write_bytes(b'abc')
         with self.assertRaisesRegex(RuntimeError,'invalid_output_target'):
             upload_output(None,self.path,{'url':'https://attacker.invalid','reference':'r2:bad'})
+
+    def test_supabase_output_scopes_project_bucket_path_and_metadata(self):
+        self.path.write_bytes(b'abc')
+        asset='10000000-0000-4000-8000-000000000001'
+        path=f'/storage/v1/object/upload/sign/arqary-private-assets/private/{asset}/{asset}/{asset}/model.splat'
+        target={'url':'https://topvfivrvbuyachzlsnd.supabase.co'+path+'?token=scoped', 'reference':f'r2:{asset}/model.splat'}
+        class UploadSession:
+            def put(inner,url,**kwargs):
+                self.assertEqual(json.loads(base64.b64decode(kwargs['headers']['x-metadata'])),{'assetId':asset})
+                self.assertFalse(kwargs['allow_redirects'])
+                self.assertEqual(kwargs['data'].read(),b'abc')
+                return Response([],status=200)
+        self.assertEqual(upload_output(UploadSession(),self.path,target),target['reference'])
+        for url in [target['url'].replace('arqary-private-assets','property-images'),target['url'].replace('/model.splat','/other.splat'),target['url'].replace('topvfivrvbuyachzlsnd','otherproject')]:
+            with self.assertRaisesRegex(RuntimeError,'invalid_output_target'):
+                upload_output(None,self.path,{**target,'url':url})
 
     def test_private_output_does_not_log_signed_url_on_failure(self):
         self.path.write_bytes(b'abc')
