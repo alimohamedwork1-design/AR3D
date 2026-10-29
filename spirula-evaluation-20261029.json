@@ -1,0 +1,219 @@
+{
+  "date": "2026-10-29",
+  "scope": "Owned generated cube fixture only; no real property, physical-device or paid customer acceptance",
+  "spirula": {
+    "schema": "arqary.spirula.experiment.v1",
+    "engine": "spirula",
+    "release": "v2026.10.16",
+    "upstream_commit": "65246c5579c127081bff6f4422bd12a542906f78",
+    "binary_sha256": "f29ef66ed881a3d5a5c9f2e1f1bb587c21617442eed16ee9d11830150f41ae03",
+    "engine_license": "GPL-3.0",
+    "state": "completed",
+    "eligible_for_publication": false,
+    "coordinate_space": "reconstruction_relative_not_metric",
+    "iterations": 3000,
+    "max_gaussians": 200000,
+    "timeout_seconds": 600,
+    "input": [
+      {
+        "name": "frame_0000.png",
+        "sha256": "b68dbbcf6f8a9b762c6f2f3f9f474002284bb86c863952645e2d86bb7336bcbd",
+        "prepared_sha256": "b68dbbcf6f8a9b762c6f2f3f9f474002284bb86c863952645e2d86bb7336bcbd"
+      },
+      {
+        "name": "frame_0001.png",
+        "sha256": "91ad2a444d891742e8003b64a9dc8da1da47b6c41c24ee8662e6b775b87418f3",
+        "prepared_sha256": "91ad2a444d891742e8003b64a9dc8da1da47b6c41c24ee8662e6b775b87418f3"
+      },
+      {
+        "name": "frame_0002.png",
+        "sha256": "cd592ab53d2b215b832547b11c90015dd4180277991358c58ab606ee68e3b4cb",
+        "prepared_sha256": "cd592ab53d2b215b832547b11c90015dd4180277991358c58ab606ee68e3b4cb"
+      },
+      {
+        "name": "frame_0003.png",
+        "sha256": "20145a3dd9081fe69ef0682c341673a7eff35a17fcd999c156a79f53c65ebb7c",
+        "prepared_sha256": "20145a3dd9081fe69ef0682c341673a7eff35a17fcd999c156a79f53c65ebb7c"
+      },
+      {
+        "name": "frame_0004.png",
+        "sha256": "dba3298695d55fd0da3bf800747a273513d65f8b60c9da8b9bf869ab45b1926a",
+        "prepared_sha256": "dba3298695d55fd0da3bf800747a273513d65f8b60c9da8b9bf869ab45b1926a"
+      },
+      {
+        "name": "frame_0005.png",
+        "sha256": "4e2f6fef8a00e4ebc67a1a980aa6ae5a7710700a81547d27607d47c2a2756b40",
+        "prepared_sha256": "4e2f6fef8a00e4ebc67a1a980aa6ae5a7710700a81547d27607d47c2a2756b40"
+      },
+      {
+        "name": "frame_0006.png",
+        "sha256": "fb448c461f6eecb8d73b640f8a6cb2fbc2f9445361a37d5600d0285aef7625a2",
+        "prepared_sha256": "fb448c461f6eecb8d73b640f8a6cb2fbc2f9445361a37d5600d0285aef7625a2"
+      },
+      {
+        "name": "frame_0007.png",
+        "sha256": "aec0456a048d2ffdd93fb0a01218d65d8424d7b852d6821a291f50b6dca6d98a",
+        "prepared_sha256": "aec0456a048d2ffdd93fb0a01218d65d8424d7b852d6821a291f50b6dca6d98a"
+      },
+      {
+        "name": "frame_0008.png",
+        "sha256": "b355429f01e3d1e8a18bfeeb40af753bc7d810c9bdf05a2ab82658b0299e8802",
+        "prepared_sha256": "b355429f01e3d1e8a18bfeeb40af753bc7d810c9bdf05a2ab82658b0299e8802"
+      },
+      {
+        "name": "frame_0009.png",
+        "sha256": "69e5f2e6e419cc78e5d1e7a769c874df93a967af12dca3f58cd935c1cc741760",
+        "prepared_sha256": "69e5f2e6e419cc78e5d1e7a769c874df93a967af12dca3f58cd935c1cc741760"
+      },
+      {
+        "name": "frame_0010.png",
+        "sha256": "7298bd6a04d6c78f5464e16615b3a13759b4ba22e290dde8d9ea31f4004e285e",
+        "prepared_sha256": "7298bd6a04d6c78f5464e16615b3a13759b4ba22e290dde8d9ea31f4004e285e"
+      },
+      {
+        "name": "frame_0011.png",
+        "sha256": "2fdbf72dfd5acedbdc773fc5e9c0a1ec509c0b04630fd743dada6f630eab8911",
+        "prepared_sha256": "2fdbf72dfd5acedbdc773fc5e9c0a1ec509c0b04630fd743dada6f630eab8911"
+      }
+    ],
+    "stages": {
+      "sfm_seconds": 6.175,
+      "training_seconds": 10.135
+    },
+    "registered_views": 12,
+    "input_views": 12,
+    "evaluation": {
+      "held_out_views": 3,
+      "psnr_db": 13.7658,
+      "ssim": 0.635319
+    },
+    "preview_camera": {
+      "initial": {
+        "position": [
+          0.9999999999999999,
+          -0.054896855371782655,
+          0.05312364567438758
+        ],
+        "target": [
+          0.6680111800005736,
+          -0.9968568141664779,
+          0.0031750778982753483
+        ],
+        "fov": 78.02808609990927
+      }
+    },
+    "gaussians": 12724,
+    "output": {
+      "path": "point_cloud.ply",
+      "bytes": 3157082,
+      "sha256": "98db9a57486af352505229daa578cc1177821c86599532e1a6d6a086fa0fac6b",
+      "normalized_rotations": true
+    },
+    "elapsed_seconds": 16.722
+  },
+  "baseline": {
+    "engine": "gsplat",
+    "version": "1.5.3",
+    "license": "Apache-2.0",
+    "iterations": 3000,
+    "views": 9,
+    "gaussians": 131680,
+    "first_loss": 0.42552757263183594,
+    "last_loss": 0.07424945384263992,
+    "last_training_view_psnr_db": 15.829110838039638,
+    "max_gaussians": 200000,
+    "density_frozen_at": 1101,
+    "seconds": 11.078,
+    "coordinate_space": "sfm_relative_not_metric",
+    "held_out_names": [
+      "photo_00.png",
+      "photo_04.png",
+      "photo_08.png"
+    ],
+    "held_out_psnr_db": [
+      12.926372865443325,
+      16.63566316567194,
+      16.93442565454302
+    ],
+    "avg_held_out_psnr_db": 15.498820561886093,
+    "scope": "same source frames; same three held-out image identities; independent camera recovery and training recipes; no representative-property claim"
+  },
+  "comparison_limits": [
+    "same 12 source images and same 3 held-out frame identities; independent camera recovery and training recipes",
+    "gsplat warmed training time excludes earlier JIT compilation; timings are not a production throughput benchmark"
+  ],
+  "sog": {
+    "tool": "PlayCanvas SplatTransform",
+    "version": "3.10.3",
+    "seconds": 39.939,
+    "bytes": 390842,
+    "sha256": "b91f3304c73201b00242e1709e0dab724144cdf660585a2f747b8143bd727040"
+  },
+  "browser": {
+    "passed": true,
+    "checks": [
+      {
+        "device": "desktop",
+        "format": "ply",
+        "first_frame": true,
+        "first_frame_wall_ms": 502,
+        "visible_bright_pixels": 661542,
+        "javascript_errors": [],
+        "renderer_scope": "software WebGL test; not physical mobile GPU performance"
+      },
+      {
+        "device": "desktop",
+        "format": "sog",
+        "first_frame": true,
+        "first_frame_wall_ms": 514,
+        "visible_bright_pixels": 659027,
+        "javascript_errors": [],
+        "renderer_scope": "software WebGL test; not physical mobile GPU performance"
+      },
+      {
+        "device": "mobile",
+        "format": "ply",
+        "first_frame": true,
+        "first_frame_wall_ms": 406,
+        "visible_bright_pixels": 157254,
+        "javascript_errors": [],
+        "renderer_scope": "software WebGL test; not physical mobile GPU performance"
+      },
+      {
+        "device": "mobile",
+        "format": "sog",
+        "first_frame": true,
+        "first_frame_wall_ms": 466,
+        "visible_bright_pixels": 156667,
+        "javascript_errors": [],
+        "renderer_scope": "software WebGL test; not physical mobile GPU performance"
+      }
+    ]
+  },
+  "local_tests": {
+    "passed": 34,
+    "command": "python -m unittest discover"
+  },
+  "runpod": {
+    "pod_id": "kmo05hz404blnb",
+    "gpu": "NVIDIA GeForce RTX 4090",
+    "driver": "595.91.07",
+    "vulkan": "1.4.329",
+    "created_at": "2026-10-29T14:39:27.501Z",
+    "termination_confirmed_before": "2026-10-29T14:53:09Z",
+    "quoted_compute_usd_per_hour": 0.89,
+    "billing_limit": "rate/duration are not a reconciled provider invoice",
+    "deleted": true,
+    "remaining_pods": 0,
+    "basira_resources_changed": false,
+    "control_credential_removed": true
+  },
+  "decision": "Keep opt-in experiment; current gsplat held-out score is higher; no production replacement or customer enablement",
+  "source_note": "Successful final native run used the adapter before the later float64 quaternion-norm hardening; final CLI boundary tests passed. Inference recipe and captured-camera logic are unchanged.",
+  "standalone_demo": {
+    "first_frame": true,
+    "external_network_requests": [],
+    "javascript_errors": [],
+    "passed": true
+  }
+}
